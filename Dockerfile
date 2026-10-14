@@ -1,9 +1,10 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-# linux/amd64 only: the committed lockfile is resolved for this platform, which
-# sidesteps npm #4828 (optional native deps missing in cross-platform builds).
-FROM --platform=linux/amd64 node:22.20.0-slim AS frontend-builder
+# The frontend stage runs on the build host's platform, not the target's: the
+# built assets are platform-independent, and running npm ci under QEMU for
+# arm64 hits npm #4828 (optional native deps missing in cross-platform builds).
+FROM --platform=$BUILDPLATFORM node:22.20.0-slim AS frontend-builder
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/package-lock.json ./
@@ -15,7 +16,7 @@ RUN npm run build
 
 
 # 2. production Python image
-FROM --platform=linux/amd64 python:3.12.12-slim-bookworm AS backend
+FROM python:3.12.12-slim-bookworm AS backend
 WORKDIR /app
 
 # pg_dump / pg_restore for backup & restore (see app/backup_pg.py)
