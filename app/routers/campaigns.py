@@ -683,6 +683,39 @@ async def list_sequences(campaign_id: int, db: AsyncSession = Depends(get_db)):
     return result.scalars().all()
 
 
+async def _validate_new_position(db: AsyncSession, campaign_id: int, position: int) -> None:
+    """Steps are 0-based and gapless; a value below the step count inserts and shifts the tail."""
+    n_steps = (await db.execute(
+        select(func.count(Sequence.id)).where(Sequence.campaign_id == campaign_id)
+    )).scalar() or 0
+    if not 0 <= position <= n_steps:
+        raise HTTPException(
+            422,
+            f"position {position} is out of range: steps are 0-based, "
+            f"allowed 0..{n_steps} (next free position is {n_steps})",
+        )
+    if position < n_steps:
+        # Queue slots, email logs and the reply-chain lookup address steps by index; shifting
+        # them under live enrollments would send the wrong text (defect 4). Safe only while empty.
+        enrolled = (await db.execute(
+            select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id).limit(1)
+        )).first()
+        if enrolled is not None:
+            raise HTTPException(
+                422,
+                f"cannot insert a step at position {position}: leads are already enrolled; "
+                f"add it at the end (position {n_steps})",
+            )
+        tail = await db.execute(
+            select(Sequence)
+            .where(Sequence.campaign_id == campaign_id, Sequence.position >= position)
+            .order_by(Sequence.position.desc())
+        )
+        for s in tail.scalars().all():
+            s.position += 1
+        await db.flush()
+
+
 @router.post("/{campaign_id}/sequences", response_model=SequenceResponse)
 async def create_sequence(
     campaign_id: int,
@@ -694,6 +727,7 @@ async def create_sequence(
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
+    await _validate_new_position(db, campaign_id, data.position)
     seq = Sequence(
         campaign_id=campaign_id,
         position=data.position,
