@@ -1,0 +1,6 @@
+# Host nginx proxies outreach.veltiono.eu → 127.0.0.1:${QUICKLY_PORT}. Loopback only: Docker
+# bypasses ufw for published ports, so never publish on 0.0.0.0.
+services:
+  app:
+    ports:
+      - "127.0.0.1:${QUICKLY_PORT:-5050}:8000"
