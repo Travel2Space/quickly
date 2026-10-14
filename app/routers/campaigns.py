@@ -18,6 +18,7 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
+from app.send_prep import clear_missing_var_blocks
 from app.models import (
     Campaign,
     Sequence,
@@ -595,6 +596,7 @@ async def update_campaign(
             log.info("Campaign %s timezone changed (%s -> %s); triggering queue recalculation", campaign_id, old_tz, campaign.timezone)
             needs_global_recalc = True
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     if needs_global_recalc:
         await db.commit()
         from app.routers.schedule import enqueue_global_recalculate
@@ -807,6 +809,7 @@ async def update_sequence(
 
             enqueue_global_recalculate(background_tasks)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     # Re-query with variants eagerly loaded to avoid lazy-load MissingGreenlet error
     result2 = await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
@@ -844,6 +847,7 @@ async def delete_sequence(
     for s in remaining.scalars().all():
         s.position -= 1
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     # If we deleted a personalized sequence, reconcile leads' statuses
     if was_personalized:
         await reconcile_personalized_status(db, campaign_id, background_tasks)
@@ -906,6 +910,7 @@ async def create_variant(
     )
     db.add(variant)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     await db.refresh(variant)
     log.info("create_variant: sequence=%s variant=%s label=%r", seq.id, variant.id, variant.label)
     return variant
@@ -948,6 +953,7 @@ async def update_variant(
     if data.enabled is not None:
         variant.enabled = data.enabled
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     await db.refresh(variant)
     return variant
 
@@ -974,6 +980,7 @@ async def delete_variant(
         raise HTTPException(404, "Variant not found")
     await db.delete(variant)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     return {"ok": True}
 
 
@@ -1212,6 +1219,7 @@ async def patch_campaign_lead(
         cl.sending_paused = payload.sending_paused
 
     await db.flush()
+    await clear_missing_var_blocks(db, lead_id=lead_id, campaign_id=campaign_id)
     # Full global recalculation: schedule must mirror what the send job will deliver.
     await db.commit()
     from app.routers.schedule import enqueue_global_recalculate
@@ -2106,6 +2114,7 @@ async def bulk_add_leads_to_campaign(
                     changed = True
                 if changed:
                     await db.flush()
+                    await clear_missing_var_blocks(db, lead_id=lead.id)
 
             # Check enrollment
             if skip_duplicates:
@@ -2835,6 +2844,7 @@ async def import_campaign_leads(
                         changed = True
                 if changed:
                     await db.flush()
+                    await clear_missing_var_blocks(db, lead_id=lead.id)
 
             if skip_duplicates:
                 # Global check: skip if enrolled in any campaign

@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.campaign_lead_status import LEAD_INTERESTS, normalize_enrollment_status, normalize_interest
 from app.database import get_db
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
+from app.send_prep import clear_missing_var_blocks
 from app.models import (
     Campaign,
     CampaignLead,
@@ -868,6 +869,8 @@ async def update_lead(
         lead.name = data.name
     if data.custom_data is not None:
         lead.custom_data = data.custom_data
+    if data.name is not None or data.custom_data is not None:
+        await clear_missing_var_blocks(db, lead_id=lead_id)
     enrollment_changed = False
     if data.enrollment_status is not None:
         target = normalize_enrollment_status(data.enrollment_status)

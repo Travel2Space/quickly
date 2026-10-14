@@ -38,9 +38,9 @@ from app.models import (
     Office365Message,
     CustomEmailOverride,
 )
-from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
+from app.sender import MissingTemplateVars, send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
-from app.send_prep import notify_once
+from app.send_prep import notify_once, render_all_strict
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -244,6 +244,7 @@ async def run_send_job():
                     QueueSlot.inbox_id == inbox.id,
                     func.date(QueueSlot.scheduled_date) == today,
                     QueueSlot.scheduled_date <= now,
+                    QueueSlot.blocked_missing_vars.is_(None),
                 )
                 .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
             )
@@ -661,10 +662,6 @@ async def run_send_job():
                 else:
                     subject = seq_subject.strip()
 
-                # Apply lead-data variable substitution to the subject line
-                # (same {{firstName}} / {{company}} etc. tokens as the body).
-                subject = render_body(subject, get_lead_data(lead))
-
                 # ── Determine HTML mode ──────────────────────────────────────
                 # Override chain (highest → lowest priority):
                 #   1. Settings-level text-only (send_all_as_text / send_first_as_text)
@@ -729,14 +726,22 @@ async def run_send_job():
                 lead_data = get_lead_data(lead)
                 lead_data["unsubscribe_link"] = unsub_url
 
-                body = render_body(seq_body, lead_data)
+                try:
+                    rendered = render_all_strict(
+                        {"subject": subject, "body": seq_body,
+                         "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                        lead_data,
+                    )
+                except MissingTemplateVars as exc:
+                    await _block_slot_missing_vars(session, slot, campaign, lead, exc.names)
+                    continue
+                subject, body = rendered["subject"], rendered["body"]
                 # Inject hidden preheader so email clients show the custom preview text.
-                if is_html and seq_preview_text:
-                    rendered_preview = render_body(seq_preview_text, lead_data)
+                if rendered["preview"]:
                     preheader = (
                         '<div style="display:none !important; visibility:hidden; '
                         'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
-                        f'{rendered_preview}</div>'
+                        f'{rendered["preview"]}</div>'
                     )
                     body = preheader + body
                 from_addr = inbox.email
@@ -1120,6 +1125,20 @@ async def run_send_job():
 # Per-slot job: fired by APScheduler at the slot's exact scheduled_date
 # ---------------------------------------------------------------------------
 
+async def _block_slot_missing_vars(session, slot, campaign, lead, names: list[str]) -> None:
+    """Park a slot whose templates have unfilled variables (Q-5): nothing is sent."""
+    slot.blocked_missing_vars = names
+    log.warning(
+        "send: slot %d parked – lead %d in campaign %d lacks %s",
+        slot.id, lead.id, campaign.id, ", ".join(names),
+    )
+    await fire_webhook_event(session, "send.blocked_missing_vars", {
+        "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
+        "missing": names, "slot_id": slot.id,
+    })
+    await session.commit()
+
+
 async def send_slot_job(slot_id: int) -> None:
     """Send a single queue slot identified by *slot_id*.
 
@@ -1177,6 +1196,8 @@ async def send_slot_job(slot_id: int) -> None:
         # ── Pre-flight checks ────────────────────────────────────────────
         if inbox.paused:
             log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
+            return
+        if slot.blocked_missing_vars:
             return
         if _inbox_auth_cooldown_active(inbox.id, now):
             log.warning(
@@ -1518,8 +1539,6 @@ async def send_slot_job(slot_id: int) -> None:
         else:
             subject = seq_subject.strip()
 
-        subject = render_body(subject, get_lead_data(lead))
-
         # ── HTML / plain-text decision ────────────────────────────────────
         format_override = None
         if getattr(campaign, "send_all_as_text", False):
@@ -1562,13 +1581,21 @@ async def send_slot_job(slot_id: int) -> None:
         lead_data = get_lead_data(lead)
         lead_data["unsubscribe_link"] = unsub_url
 
-        body = render_body(seq_body, lead_data)
-        if is_html and seq_preview_text:
-            rendered_preview = render_body(seq_preview_text, lead_data)
+        try:
+            rendered = render_all_strict(
+                {"subject": subject, "body": seq_body,
+                 "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                lead_data,
+            )
+        except MissingTemplateVars as exc:
+            await _block_slot_missing_vars(session, slot, campaign, lead, exc.names)
+            return
+        subject, body = rendered["subject"], rendered["body"]
+        if rendered["preview"]:
             preheader = (
                 '<div style="display:none !important; visibility:hidden; '
                 'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
-                f"{rendered_preview}</div>"
+                f"{rendered['preview']}</div>"
             )
             body = preheader + body
 
@@ -1922,7 +1949,7 @@ async def run_slot_scan_job() -> None:
     async with AsyncSessionLocal() as session:
         due_res = await session.execute(
             select(QueueSlot.id, QueueSlot.scheduled_date)
-            .where(QueueSlot.scheduled_date <= window_end)
+            .where(QueueSlot.scheduled_date <= window_end, QueueSlot.blocked_missing_vars.is_(None))
             .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
         )
         rows = due_res.all()

@@ -340,6 +340,9 @@ class QueueSlot(Base):
     variant_id = Column(
         Integer, ForeignKey("sequence_variant.id", ondelete="SET NULL"), nullable=True, default=None
     )
+    # Names of template variables the lead lacks; set = parked (the scanner skips it)
+    # until a lead/step edit clears it. JSON(none_as_null) so clearing writes SQL NULL.
+    blocked_missing_vars = Column(JSON(none_as_null=True), nullable=True, default=None)
     campaign_lead = relationship("CampaignLead", back_populates="queue_slots")
     inbox = relationship("Inbox")
     variant = relationship("SequenceVariant", foreign_keys=[variant_id])
@@ -961,4 +964,5 @@ WEBHOOK_EVENT_TYPES = [
     "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
     "send.step_missing",   # A queued email points at a step the campaign no longer has
+    "send.blocked_missing_vars",  # A lead lacks template variables; its email is held
 ]
