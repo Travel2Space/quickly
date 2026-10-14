@@ -17,6 +17,7 @@ from __future__ import annotations
 # // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
+import html
 import ipaddress
 import logging
 
@@ -32,6 +33,9 @@ from app.tracking_events import (
     record_email_click,
     record_email_open,
     process_unsubscribe,
+    unsubscribe_token_exists,
+    _CONFIRM_UNSUBSCRIBE_HTML,
+    INVALID_UNSUBSCRIBE_HTML,
     resolve_click_redirect_url,
 )
 from app.client_ip import client_ip_from_request
@@ -78,24 +82,23 @@ async def click_redirect(
 
 
 @router.get("/u/{token}", include_in_schema=False)
-async def unsubscribe(
-    token: str,
-    db: AsyncSession = Depends(get_db),
-):
-    """Process an unsubscribe request.
+async def unsubscribe_confirm_page(token: str, db: AsyncSession = Depends(get_db)):
+    """Human page. A GET never unsubscribes: mail scanners prefetch links."""
+    if not await unsubscribe_token_exists(db, token):
+        return Response(content=INVALID_UNSUBSCRIBE_HTML, media_type="text/html", status_code=404)
+    page = _CONFIRM_UNSUBSCRIBE_HTML.replace("{token}", html.escape(token, quote=True))
+    return Response(content=page, media_type="text/html", status_code=200)
 
-    Works both as a one-click server-side action (no browser needed – the
-    email client just fires a POST/GET) and as a human-readable page when
-    opened in a browser.  The token encodes the (lead, campaign) pair so we
-    know exactly which campaign to stop.
 
-    Actions:
-      1. Mark this lead's **enrollment** in that campaign as ``unsubscribed``.
-      2. Delete remaining ``QueueSlot`` rows for this lead+campaign so no
-         further emails are dispatched.
+@router.post("/u/{token}", include_in_schema=False)
+async def unsubscribe_one_click(token: str, db: AsyncSession = Depends(get_db)):
+    """RFC 8058 one-click (body 'List-Unsubscribe=One-Click', ignored) and the page's button.
+
+    Unsubscribes the address from every campaign: the enrollment behind the token is
+    stopped and the address is suppressed globally.
     """
-    html, status = await process_unsubscribe(db, token)
-    return Response(content=html, media_type="text/html", status_code=status)
+    page, status = await process_unsubscribe(db, token)
+    return Response(content=page, media_type="text/html", status_code=status)
 
 
 @router.get("/api/caddy/ask", include_in_schema=False)

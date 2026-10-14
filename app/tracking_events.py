@@ -27,6 +27,7 @@ from app.models import (
     QueueSlot,
     TrackedLink,
 )
+from app.suppression import suppress_email
 from app.webhooks import fire_webhook_event
 
 if TYPE_CHECKING:
@@ -70,6 +71,18 @@ ALREADY_UNSUBSCRIBED_HTML = _UNSUBSCRIBE_HTML.replace(
 )
 
 INVALID_UNSUBSCRIBE_HTML = "<p>Invalid or expired unsubscribe link.</p>"
+
+_CONFIRM_UNSUBSCRIBE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Unsubscribe</title></head>
+<body style="font-family:sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem">
+<h1>Unsubscribe from these emails?</h1>
+<form method="post" action="/u/{token}"><button type="submit">Unsubscribe</button></form>
+</body></html>"""
+
+
+async def unsubscribe_token_exists(db: AsyncSession, token: str) -> bool:
+    row = await db.execute(select(LeadUnsubscribeToken.id).where(LeadUnsubscribeToken.token == token))
+    return row.first() is not None
 
 
 async def is_known_ip(db: AsyncSession, ip: str | None) -> bool:
@@ -209,6 +222,9 @@ async def process_unsubscribe(db: AsyncSession, token: str) -> tuple[str, int]:
                 token,
             )
         await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+
+    if lead is not None:
+        await suppress_email(db, lead.email, "unsubscribe")
 
     await db.commit()
 
