@@ -486,6 +486,12 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
 
   useEffect(() => { loadVerificationSummary(); }, [loadVerificationSummary]);
 
+  // Pre-launch check: leads lacking template variables have their emails held.
+  const [missingVars, setMissingVars] = useState(null);
+  useEffect(() => {
+    api.get(`/campaigns/${campaignId}/missing-vars`).then(setMissingVars).catch(() => {});
+  }, [campaignId, leads]);
+
   useEffect(() => {
     api.get('/settings/email-verification').then(d => {
       const enabled = !!d.enabled;
@@ -911,6 +917,14 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           </form>
         )}
       </div>
+
+      {missingVars?.leads_missing > 0 && (
+        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+          {missingVars.leads_missing} lead(s) are missing template variables:{' '}
+          {Object.entries(missingVars.variables).map(([k, n]) => `${k} (${n})`).join(', ')}.
+          {' '}Their emails are held until the data is filled in.
+        </div>
+      )}
 
       {/* Filter bar */}
       <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">

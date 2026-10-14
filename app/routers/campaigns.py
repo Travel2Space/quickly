@@ -18,7 +18,7 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
-from app.send_prep import clear_missing_var_blocks
+from app.send_prep import clear_missing_var_blocks, missing_vars_report
 from app.models import (
     Campaign,
     Sequence,
@@ -603,8 +603,11 @@ async def update_campaign(
 
         enqueue_global_recalculate(background_tasks)
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
+    resp = _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+    if data.paused is False and old_paused:
+        resp.missing_vars = await missing_vars_report(db, campaign_id)
     await db.commit()
-    return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+    return resp
 
 
 @router.post("/{campaign_id}/duplicate", response_model=CampaignResponse)
@@ -671,6 +674,12 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
     log.info("duplicate_campaign: original=%s new=%s sequences=%d", campaign_id, new_campaign.id, len(sequences))
     
     return _campaign_to_response(new_campaign, inbox_ids)
+
+
+@router.get("/{campaign_id}/missing-vars")
+async def get_missing_vars(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Pre-launch check: enrolled leads lacking template variables (they would be held)."""
+    return await missing_vars_report(db, campaign_id)
 
 
 # ---- Sequences ----
@@ -2258,6 +2267,7 @@ async def bulk_add_leads_to_campaign(
         "errors": errors,
         "results": results,
         "verification_queued": verify_emails and bool(added_lead_ids),
+        "missing_vars": await missing_vars_report(db, campaign_id),
     }
 
 
@@ -2969,6 +2979,7 @@ async def import_campaign_leads(
         "errors": errors,
         "total_rows": added + already_enrolled + duplicates_in_batch + errors,
         "verification_queued": verify_emails and bool(added_lead_ids_csv),
+        "missing_vars": await missing_vars_report(db, campaign_id),
     }
 
 

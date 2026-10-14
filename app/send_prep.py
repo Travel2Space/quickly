@@ -71,3 +71,45 @@ def render_all_strict(texts: dict, lead_data: dict) -> dict:
     if missing:
         raise MissingTemplateVars(missing)
     return out
+
+
+def template_var_names(*texts) -> set[str]:
+    from app.sender import _TEMPLATE_VAR_RE
+
+    names: set[str] = set()
+    for text in texts:
+        if text:
+            names.update(m.strip() for m in _TEMPLATE_VAR_RE.findall(text))
+    return names
+
+
+async def missing_vars_report(db, campaign_id: int) -> dict:
+    """Before anything is sent: how many enrolled leads lack which template variables."""
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+    from app.models import CampaignLead, Lead, Sequence
+    from app.sender import _BUILTIN_TEMPLATE_VARS, get_lead_data
+
+    seqs = (await db.execute(
+        select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.campaign_id == campaign_id)
+    )).scalars().all()
+    texts: list = []
+    for s in seqs:
+        texts += [s.subject, s.body, s.preview_text, s.fallback_subject, s.fallback_body]
+        texts += [t for v in s.variants if v.enabled for t in (v.subject, v.body, v.preview_text)]
+    needed = template_var_names(*texts) - _BUILTIN_TEMPLATE_VARS - {"unsubscribe_link"}
+    if not needed:
+        return {"leads_missing": 0, "variables": {}}
+    leads = (await db.execute(
+        select(Lead).join(CampaignLead, CampaignLead.lead_id == Lead.id).where(CampaignLead.campaign_id == campaign_id)
+    )).scalars().all()
+    counts: dict[str, int] = {}
+    leads_missing = 0
+    for lead in leads:
+        data = get_lead_data(lead)
+        gaps = [n for n in needed if data.get(n) is None or not str(data.get(n)).strip()]
+        if gaps:
+            leads_missing += 1
+            for n in gaps:
+                counts[n] = counts.get(n, 0) + 1
+    return {"leads_missing": leads_missing, "variables": dict(sorted(counts.items()))}

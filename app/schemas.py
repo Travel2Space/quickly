@@ -385,6 +385,8 @@ class CampaignResponse(BaseModel):
     # new stats object; the frontend can always rely on ``stats`` being
     # present and it initially contains zeros.
     stats: CampaignStats = CampaignStats()
+    # Pre-launch check, filled only when a paused campaign is resumed.
+    missing_vars: Optional[dict] = None
 
     class Config:
         from_attributes = True
