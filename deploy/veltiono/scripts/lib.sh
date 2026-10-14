@@ -4,6 +4,9 @@
 # and from a container that talks to the Docker socket (deploy/veltiono/test/run.sh).
 set -euo pipefail
 
+# cron's default PATH is /usr/bin:/bin: no age/docker in /usr/local/bin. Same value as cron/quickly.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/quickly}"
 STATE_DIR="${STATE_DIR:-$DEPLOY_DIR/state}"
 mkdir -p "$STATE_DIR"
