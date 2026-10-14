@@ -2148,6 +2148,10 @@ async def bulk_add_leads_to_campaign(
             continue
 
         try:
+            if await is_suppressed(db, email):  # case-insensitive, before any find-or-create
+                results.append({"email": email, "status": "suppressed", "reason": None})
+                suppressed += 1
+                continue
             # Find or create lead by email
             lead_result = await db.execute(select(Lead).where(Lead.email == email))
             lead = lead_result.scalar_one_or_none()
@@ -2889,6 +2893,11 @@ async def import_campaign_leads(
                     v = by_header.get(h, "")
                     return v if v else None
             return None
+
+        if await is_suppressed(db, email):  # case-insensitive, before any find-or-create
+            results_list.append({"row": row_num, "email": email, "status": "suppressed", "reason": None})
+            suppressed += 1
+            continue
 
         try:
             lead_result = await db.execute(select(Lead).where(Lead.email == email))

@@ -213,6 +213,11 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
     if not inbox:
         raise HTTPException(status_code=404, detail="Inbox not found")
 
+    if not data.in_reply_to and not data.thread_id:  # fresh compose; replies stay exempt
+        from app.suppression import is_suppressed
+        if await is_suppressed(db, data.to_email):
+            raise HTTPException(status_code=422, detail="address is suppressed")
+
     provider = inbox.provider or "gmail"
     gmail_account = None
     o365_account = None

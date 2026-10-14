@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, exists, or_, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -16,7 +16,7 @@ from app.campaign_lead_status import LEAD_INTERESTS, normalize_enrollment_status
 from app.database import get_db
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.send_prep import clear_missing_var_blocks
-from app.suppression import suppress_email, unsuppress_email
+from app.suppression import is_suppressed, suppress_email, unsuppress_email
 from app.auth import require_admin
 from pydantic import BaseModel
 from app.models import (
@@ -109,6 +109,8 @@ def _lead_to_response(
         custom_data=lead.custom_data if isinstance(lead.custom_data, dict) else {},
         provider=lead.provider,
         email_verification_status=lead.email_verification_status,
+        suppressed_at=lead.suppressed_at,
+        suppressed_reason=lead.suppressed_reason,
         created_at=lead.created_at,
         campaigns=camps,
         interactions=interactions or [],
@@ -481,9 +483,15 @@ def _enrolled_earliest_iso(lead: Lead) -> str:
     return str(earliest)
 
 
-async def _mutate_lead_recover(lead: Lead, norm: str, verify: bool) -> None:
+async def _mutate_lead_recover(lead: Lead, norm: str, verify: bool, db: AsyncSession) -> None:
     from app.email_verification import PENDING
+    from app.suppression import is_suppressed
 
+    if (lead.email or "").strip().lower() != norm:
+        if await is_suppressed(db, norm):
+            raise HTTPException(422, "This email address is suppressed")
+        if lead.suppressed_reason == "bounce":  # the bounced (typo) address is replaced
+            lead.suppressed_at, lead.suppressed_reason = None, None
     lead.email = norm
     lead.status = "active"
     lead.provider = None
@@ -760,13 +768,20 @@ async def bulk_recover_leads(
         if not norm:
             errors.append({"lead_id": lead_id, "detail": "empty_email"})
             continue
+        if norm != (lead.email or "").strip().lower() and await is_suppressed(db, norm):
+            errors.append({"lead_id": lead_id, "detail": "suppressed"})
+            continue
         dup = await db.execute(
-            select(Lead.id).where(Lead.email == norm, Lead.id != lead_id),
+            select(Lead.id).where(func.lower(Lead.email) == norm, Lead.id != lead_id),
         )
         if dup.scalar_one_or_none():
             errors.append({"lead_id": lead_id, "detail": "duplicate_email"})
             continue
-        await _mutate_lead_recover(lead, norm, verify)
+        try:
+            await _mutate_lead_recover(lead, norm, verify, db)
+        except HTTPException:
+            errors.append({"lead_id": lead_id, "detail": "suppressed"})
+            continue
         await _after_lead_recovered(db, lead_id)
         recovered_ids.append(lead_id)
 
@@ -954,8 +969,10 @@ async def recover_lead(
     if not norm:
         raise HTTPException(400, "Email is required")
 
+    if norm != (lead.email or "").strip().lower() and await is_suppressed(db, norm):
+        raise HTTPException(422, "This email address is suppressed")
     dup = await db.execute(
-        select(Lead.id).where(Lead.email == norm, Lead.id != lead_id),
+        select(Lead.id).where(func.lower(Lead.email) == norm, Lead.id != lead_id),
     )
     if dup.scalar_one_or_none():
         raise HTTPException(409, "Another lead already uses this email address")
@@ -969,7 +986,7 @@ async def recover_lead(
     )
     verify = body.verify_email and enabled
 
-    await _mutate_lead_recover(lead, norm, verify)
+    await _mutate_lead_recover(lead, norm, verify, db)
     await _after_lead_recovered(db, lead_id)
     await db.flush()
     await _finalize_lead_recovery(db, [lead_id], verify, background_tasks)
