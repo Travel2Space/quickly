@@ -13,9 +13,17 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - run: pip install --require-hashes -r requirements.txt -r requirements-dev.txt
-      - run: mkdir -p frontend/dist/assets
       - run: |
-          # pre-existing upstream failure at edca964 (also red on Linux at the base commit)
+          mkdir -p frontend/dist/assets
+          printf '<!doctype html><title>Quickly</title><div id="root"></div>\n' > frontend/dist/index.html
+      # Pre-existing upstream failures at edca964 (red on Linux at the base commit too); remove when fixed.
+      # test_mcp_setup_public: expects 200 on a public route, gets 401 (auth dependency).
+      # test_delete_inbox_in_use_raises_400: expects HTTPException, nothing raised.
+      # test_list_and_get_include_counts: replies count is 0, expected 1.
+      # test_schedule_api_basic_endpoints: 401 where 200 expected (auth dependency).
+      # test_schedule_sent_includes_opens_clicks: 401 where 200 expected (auth dependency).
+      # test_add_opens_setting_endpoint: no such table app_setting in SQLite test DB.
+      - run: |
           python -m pytest -q -p no:cacheprovider \
             --deselect tests/test_mcp_setup_api.py::test_mcp_setup_public \
             --deselect tests/test_pause_inbox_and_bulk_duplicates.py::test_delete_inbox_in_use_raises_400 \
