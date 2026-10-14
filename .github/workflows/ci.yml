@@ -46,3 +46,8 @@ jobs:
           docker run -d --network host -e DATABASE_URL=postgresql+asyncpg://postgres:pg@127.0.0.1:5432/postgres \
             quickly:ci
           curl -sf --retry 30 --retry-delay 2 --retry-connrefused http://127.0.0.1:8000/health
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker logs $(docker ps -aq | head -1) | tail -100
