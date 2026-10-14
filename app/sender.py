@@ -144,6 +144,12 @@ def render_body(body: str, lead_data: Dict[str, Any], strict: bool = False) -> s
     return out
 
 
+def _msgid_domain(from_email: str | None) -> str | None:
+    """Our Message-IDs use the sender's domain, never the container hostname."""
+    local, at, domain = (from_email or "").strip().rpartition("@")
+    return domain.lower() if at and local and domain else None
+
+
 def get_lead_data(lead) -> Dict[str, Any]:
     """Build dict for template substitution from a Lead model."""
     data = {"name": lead.name or "", "email": lead.email or ""}
@@ -508,7 +514,7 @@ def _send_via_gmail(
         return None
 
     # compose the MIME message using Python stdlib (no external deps)
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     msg = _build_email_message(
         to_email=to_email,
         subject=subject,
@@ -712,7 +718,7 @@ def send_email(
         provider = "gmail"
 
     if settings.test_mode:
-        fake_id = make_msgid()
+        fake_id = make_msgid(domain=_msgid_domain(from_email))
         log.info(
             "TEST MODE: simulated send to=%s subject=%r from=%s — no email actually sent",
             to_email, subject, from_email,
@@ -880,7 +886,7 @@ def _send_via_office365(
     # Build the MIME message once — same path as Gmail, so List-Unsubscribe,
     # List-Unsubscribe-Post, In-Reply-To, References etc. are all set as
     # normal RFC 2822 headers without any provider-specific workaround.
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     mime_msg = _build_email_message(
         to_email=to_email,
         subject=subject,
@@ -1127,7 +1133,7 @@ def _send_via_smtp(
     import smtplib
     import socket
 
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     mime_msg = _build_email_message(
         to_email=to_email,
         subject=subject,
