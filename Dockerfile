@@ -1,13 +1,13 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-FROM node:22-slim AS frontend-builder
+# linux/amd64 only: the committed lockfile is resolved for this platform, which
+# sidesteps npm #4828 (optional native deps missing in cross-platform builds).
+FROM --platform=linux/amd64 node:22.20.0-slim AS frontend-builder
 WORKDIR /app/frontend
 
-# copy only package.json (NOT lockfile) — npm ci + lockfile is broken
-# for multi-platform builds due to npm bug #4828 with optional deps
-COPY frontend/package.json ./
-RUN npm install
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
 
 # copy the rest of the frontend code and build
 COPY frontend/ .
@@ -15,7 +15,7 @@ RUN npm run build
 
 
 # 2. production Python image
-FROM python:3.12-slim AS backend
+FROM --platform=linux/amd64 python:3.12.12-slim-bookworm AS backend
 WORKDIR /app
 
 # pg_dump / pg_restore for backup & restore (see app/backup_pg.py)
@@ -25,7 +25,7 @@ RUN apt-get update \
 
 # install runtime dependencies
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # copy backend source code
 COPY app/ ./app/
@@ -55,6 +55,9 @@ ENV QUICKLY_MODE=production
 # Inbox UI hides CNAME-to-Quickly custom domains; use Beacon instead. Dev compose
 # and host-Caddy stacks set QUICKLY_PREBUILT_IMAGE=0 (or QUICKLY_TRACKING_CNAME_UI=1).
 ENV QUICKLY_PREBUILT_IMAGE=1
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
 # default command; environment variables (DATABASE_URL etc.) are supplied
 # at runtime rather than baked into the image
