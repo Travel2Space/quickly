@@ -201,3 +201,14 @@ async def test_ignored_domain_still_stores_reply_quoting_our_email(session, monk
 ])
 def test_sender_ignored(addr, rules, expected):
     assert unibox._sender_ignored(addr, rules) is expected
+
+
+@pytest.mark.asyncio
+async def test_incremental_pass_without_uidnext_still_fetches(session, monkeypatch):
+    inbox = await _inbox(session)
+    session.add(SmtpSyncState(inbox_id=inbox.id, uidvalidity=7, last_uid=10))
+    await session.flush()
+    _use(monkeypatch, NoUidNextImap({11: _raw("human@x.com", "<h@x>")}, uidnext=12))
+    await unibox._sync_inbox_smtp(session, inbox)
+    assert await _stored(session) == 1
+    assert (await session.execute(select(SmtpSyncState))).scalar_one().last_uid == 11

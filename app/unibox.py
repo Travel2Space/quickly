@@ -1638,11 +1638,16 @@ def _fetch_smtp_new_messages(
             mn = _re.search(r"UIDNEXT\s+(\d+)", status_raw)
             if mn:
                 uidnext = int(mn.group(1))
-            status_ok = bool(m and mn)
+            status_ok = bool(m)
+            uidnext_ok = bool(mn)
         except Exception:
             status_ok = False
+            uidnext_ok = False
         if not status_ok:
-            log.warning("SMTP sync: cannot parse IMAP STATUS (UIDVALIDITY/UIDNEXT); skipping this round")
+            log.warning("SMTP sync: cannot parse IMAP UIDVALIDITY; skipping this round")
+            return uidvalidity, [], None
+        if current_validity != uidvalidity and not uidnext_ok:
+            log.warning("SMTP sync: cannot parse IMAP UIDNEXT for the first-sync baseline; skipping this round")
             return uidvalidity, [], None
         baseline: int | None = None
         if current_validity != uidvalidity:
