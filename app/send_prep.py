@@ -21,10 +21,10 @@ def notify_once(key: Hashable, min_gap: float = 0.0) -> bool:
     """
     if key in _open:
         return False
-    _open.add(key)
     now = time.monotonic()
     if now - _last_sent.get(key, float("-inf")) < min_gap:
-        return False
+        return False  # not marked open: the next call re-checks the gap
+    _open.add(key)
     _last_sent[key] = now
     return True
 

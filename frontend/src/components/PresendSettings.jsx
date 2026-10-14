@@ -15,15 +15,21 @@ export default function PresendSettings() {
   const [tokenField, setTokenField] = useState('veltiono_token');
   const [source, setSource] = useState('off');
   const [saving, setSaving] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [origUrl, setOrigUrl] = useState('');
 
   const load = () => api.get('/settings/presend').then(d => {
     setUrl(d.url || '');
+    setOrigUrl(d.url || '');
+    setLoaded(true);
+    setLoadError('');
     setSecretSet(!!d.secret_set);
     setTimeoutSeconds(String(d.timeout_seconds ?? 5));
     setTokenField(d.token_field || 'veltiono_token');
     setSource(d.source || 'off');
     setSecret('');
-  }).catch(() => {});
+  }).catch(err => setLoadError(err?.message || 'Failed to load pre-send settings'));
 
   useEffect(() => { load(); }, []);
 
@@ -50,8 +56,9 @@ export default function PresendSettings() {
       </div>
       <p className="text-sm text-gray-500">
         Before every email Quickly asks this URL; the email is sent only on an explicit yes.
-        Leave the URL empty to turn the check off.
+        Use "Disable pre-send check" to turn the check off.
       </p>
+      {loadError && <p className="text-sm text-red-600">Could not load settings: {loadError}</p>}
       <label className="block text-sm font-medium text-gray-700">URL</label>
       <input className={FIELD} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…/api/partners/outreach/may-send" />
       <label className="block text-sm font-medium text-gray-700">Secret</label>
@@ -70,14 +77,19 @@ export default function PresendSettings() {
       <div className="flex gap-2">
         <Button
           type="button"
-          disabled={saving}
-          onClick={() => save({
-            url, secret, timeout_seconds: parseFloat(timeout) || 5, token_field: tokenField,
-          })}
+          disabled={saving || !loaded}
+          onClick={() => {
+            const payload = { secret, timeout_seconds: parseFloat(timeout) || 5, token_field: tokenField };
+            if (url.trim() && url !== origUrl) payload.url = url.trim();
+            save(payload);
+          }}
         >
           Save
         </Button>
-        <Button type="button" variant="outline" disabled={saving} onClick={() => save({ reset: true })}>
+        <Button type="button" variant="outline" disabled={saving || !loaded} onClick={() => save({ enabled: false })}>
+          Disable pre-send check
+        </Button>
+        <Button type="button" variant="outline" disabled={saving || !loaded} onClick={() => save({ reset: true })}>
           Reset to environment
         </Button>
       </div>

@@ -1231,6 +1231,7 @@ class _PresendSettings(BaseModel):
     token_field: Optional[str] = None
     suppress_reasons: Optional[str] = None
     reset: bool = False  # drop every stored presend_* value; env applies again
+    enabled: Optional[bool] = None  # False = explicitly turn the check off (the only way to store the off marker)
 
 
 @router.get("/presend")
@@ -1269,8 +1270,10 @@ async def save_presend_settings(
         await db.execute(sql_delete(AppSetting).where(AppSetting.key.in_(_PRESEND_KEYS)))
         await db.commit()
         return {"ok": True, "reset": True}
-    if payload.url is not None:
-        await put_setting(db, "presend_url", payload.url.strip())  # empty = explicitly off
+    if payload.enabled is False:
+        await put_setting(db, "presend_url", "")  # explicit off marker
+    elif payload.url is not None and payload.url.strip():
+        await put_setting(db, "presend_url", payload.url.strip())  # empty/omitted url = keep
     if payload.secret and payload.secret.strip():
         await put_setting(db, "presend_secret", payload.secret.strip())
     if payload.timeout_seconds is not None:

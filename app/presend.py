@@ -34,6 +34,14 @@ async def _value(db: AsyncSession, key: str, env: str, default: str) -> str:
     return (stored if stored is not None else os.getenv(env, default)).strip()
 
 
+def _timeout(raw: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+    return value if 0 < value < float("inf") else 5.0
+
+
 async def load_presend_config(db: AsyncSession) -> PresendConfig | None:
     url = await _value(db, "presend_url", "PRESEND_URL", "")
     if not url:
@@ -41,7 +49,7 @@ async def load_presend_config(db: AsyncSession) -> PresendConfig | None:
     return PresendConfig(
         url=url,
         secret=await _value(db, "presend_secret", "PRESEND_SECRET", ""),
-        timeout=float(await _value(db, "presend_timeout_seconds", "PRESEND_TIMEOUT_SECONDS", "5") or 5),
+        timeout=_timeout(await _value(db, "presend_timeout_seconds", "PRESEND_TIMEOUT_SECONDS", "5")),
         token_field=await _value(db, "presend_token_field", "PRESEND_TOKEN_FIELD", "veltiono_token") or "veltiono_token",
         suppress_reasons=frozenset(
             r.strip() for r in (await _value(
@@ -60,7 +68,7 @@ async def presend_check(cfg: PresendConfig, *, lead, campaign_id: int, step: int
     try:
         async with httpx.AsyncClient(timeout=cfg.timeout, transport=_TRANSPORT) as client:
             res = await client.post(cfg.url, json=payload, headers={"Authorization": f"Bearer {cfg.secret}"})
-    except httpx.HTTPError as exc:
+    except Exception as exc:  # HTTPError, InvalidURL, UnicodeEncodeError, ValueError ... never send on doubt
         raise PresendUnavailable(f"{type(exc).__name__}") from exc
     if res.status_code != 200:
         raise PresendUnavailable(f"HTTP {res.status_code}")
