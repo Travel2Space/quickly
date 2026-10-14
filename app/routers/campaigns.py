@@ -18,7 +18,7 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
-from app.send_prep import clear_missing_var_blocks, missing_vars_report
+from app.send_prep import clear_missing_var_blocks, missing_vars_report, reset_campaign_incidents
 from app.models import (
     Campaign,
     Sequence,
@@ -596,7 +596,6 @@ async def update_campaign(
             log.info("Campaign %s timezone changed (%s -> %s); triggering queue recalculation", campaign_id, old_tz, campaign.timezone)
             needs_global_recalc = True
     await db.flush()
-    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     if needs_global_recalc:
         await db.commit()
         from app.routers.schedule import enqueue_global_recalculate
@@ -739,6 +738,7 @@ async def create_sequence(
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
     await _validate_new_position(db, campaign_id, data.position)
+    reset_campaign_incidents(campaign_id)
     seq = Sequence(
         campaign_id=campaign_id,
         position=data.position,
@@ -819,6 +819,7 @@ async def update_sequence(
             enqueue_global_recalculate(background_tasks)
     await db.flush()
     await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    reset_campaign_incidents(campaign_id)
     # Re-query with variants eagerly loaded to avoid lazy-load MissingGreenlet error
     result2 = await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
@@ -857,6 +858,7 @@ async def delete_sequence(
         s.position -= 1
     await db.flush()
     await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    reset_campaign_incidents(campaign_id)
     # If we deleted a personalized sequence, reconcile leads' statuses
     if was_personalized:
         await reconcile_personalized_status(db, campaign_id, background_tasks)
@@ -1486,6 +1488,7 @@ async def write_custom_email(
         )
         db.add(override)
     await db.flush()
+    await clear_missing_var_blocks(db, lead_id=lead_id, campaign_id=campaign_id)
 
     # Check if all personalized sequences now have overrides
     pers_seq_result = await db.execute(

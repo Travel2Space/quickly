@@ -34,6 +34,12 @@ def reset_notify(key: Hashable) -> None:
     _open.discard(key)
 
 
+def reset_campaign_incidents(campaign_id: int) -> None:
+    """The campaign's steps changed: step_missing incidents may announce again."""
+    for key in [k for k in _open if isinstance(k, tuple) and k[:2] == ("step_missing", campaign_id)]:
+        _open.discard(key)
+
+
 def reset_for_tests() -> None:
     _open.clear()
     _last_sent.clear()

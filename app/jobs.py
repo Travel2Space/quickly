@@ -1130,10 +1130,13 @@ async def _block_slot_missing_vars(session, slot, campaign, lead, names: list[st
         "send: slot %d parked – lead %d in campaign %d lacks %s",
         slot.id, lead.id, campaign.id, ", ".join(names),
     )
-    await fire_webhook_event(session, "send.blocked_missing_vars", {
-        "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
-        "missing": names, "slot_id": slot.id,
-    })
+    # A re-park with the same names (e.g. after an unrelated edit un-parked the slot)
+    # stays silent; different names notify again.
+    if notify_once(("blocked", slot.id, tuple(names))):
+        await fire_webhook_event(session, "send.blocked_missing_vars", {
+            "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
+            "missing": names, "slot_id": slot.id,
+        })
     await session.commit()
 
 
@@ -1170,23 +1173,46 @@ async def send_slot_job(slot_id: int) -> None:
         row = slot_res.first()
         if not row:
             orphan = (await session.execute(
-                select(QueueSlot.sequence_index, CampaignLead.campaign_id)
+                select(QueueSlot.sequence_index, QueueSlot.inbox_id, CampaignLead.campaign_id)
                 .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
                 .where(QueueSlot.id == slot_id)
             )).first()
             if orphan is None:
                 log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
                 return
-            seq_idx, camp_id = orphan
-            log.error(
-                "send_slot_job: no step for index %d in campaign %d (slot %d) – not sent",
-                seq_idx, camp_id, slot_id,
-            )
-            if notify_once(("step_missing", camp_id, seq_idx)):
-                await fire_webhook_event(session, "send.step_missing", {
-                    "campaign_id": camp_id, "sequence_index": seq_idx, "slot_id": slot_id,
-                })
-                await session.commit()
+            seq_idx, orphan_inbox_id, camp_id = orphan
+            step_exists = (await session.execute(
+                select(Sequence.id).where(
+                    Sequence.campaign_id == camp_id, Sequence.position == seq_idx
+                ).limit(1)
+            )).first() is not None
+            if not step_exists:
+                if notify_once(("step_missing", camp_id, seq_idx)):
+                    log.error(
+                        "send_slot_job: no step for index %d in campaign %d (slot %d) – not sent",
+                        seq_idx, camp_id, slot_id,
+                    )
+                    await fire_webhook_event(session, "send.step_missing", {
+                        "campaign_id": camp_id, "sequence_index": seq_idx, "slot_id": slot_id,
+                    })
+                    await session.commit()
+                else:
+                    # The scanner re-fires the slot every minute; the incident is already open.
+                    log.debug("send_slot_job: slot %d still has no step %d", slot_id, seq_idx)
+                return
+            inbox_exists = (await session.execute(
+                select(Inbox.id).where(Inbox.id == orphan_inbox_id)
+            )).first() is not None
+            if not inbox_exists:
+                if notify_once(("slot_inbox_missing", camp_id, orphan_inbox_id)):
+                    log.error(
+                        "send_slot_job: slot %d not sent – the slot's inbox is missing (inbox_id=%s)",
+                        slot_id, orphan_inbox_id,
+                    )
+                else:
+                    log.debug("send_slot_job: slot %d still has no inbox %s", slot_id, orphan_inbox_id)
+                return
+            log.warning("send_slot_job: slot %d could not be loaded (campaign/lead rows missing)", slot_id)
             return
 
         slot, cl, campaign, lead, sequence, inbox = row
