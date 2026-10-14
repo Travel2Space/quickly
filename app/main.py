@@ -9,6 +9,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi.responses import JSONResponse
 import asyncio
 import urllib.parse as _urlparse
@@ -30,7 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.client_ip import client_ip_from_request
-from app.database import init_db, db_url
+from app.database import init_db, db_url, get_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
@@ -270,6 +272,17 @@ app.mount(
 
 if (BASE_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+
+@app.get("/health", include_in_schema=False)
+async def health(db: AsyncSession = Depends(get_db)):
+    """Unauthenticated liveness + DB check for uptime monitors and the Docker healthcheck."""
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception:
+        logging.getLogger("quickly").exception("health: database check failed")
+        return JSONResponse({"ok": False}, status_code=503)
+    return {"ok": True}
+
 
 @app.get("/api/status")
 async def api_status(request: Request, user=Depends(_auth_dep)):

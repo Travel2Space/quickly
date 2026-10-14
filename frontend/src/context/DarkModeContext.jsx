@@ -50,9 +50,11 @@ export function DarkModeProvider({ children }) {
   const applyEffectiveDark = useCallback(on => {
     if (on) {
       enable(DARKREADER_SETTINGS);
+      document.documentElement.classList.remove('darkreader-init');
       applyRootClass(true);
     } else {
       disable();
+      document.documentElement.classList.remove('darkreader-init');
       applyRootClass(false);
     }
     setDarkMode(on);
