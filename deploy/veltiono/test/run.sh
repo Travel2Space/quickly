@@ -75,8 +75,23 @@ run '. scripts/lib.sh; load_env; aws_r2 s3 cp "s3://$R2_BUCKET/quickly/$(date -u
 # D3 — restore drill with the private key on stdin
 run 'grep AGE-SECRET-KEY /tmp/age.key | bash scripts/restore-drill.sh' | grep 'drill ok' >/dev/null && pass D3 || die D3
 
-# D3b — streamed production restore: confirmation + key on stdin, app healthy afterwards
-run '{ echo RESTORE; grep AGE-SECRET-KEY /tmp/age.key; } | bash scripts/restore-prod.sh' >/dev/null && pass D3b || die D3b
+# D3b — production restore: a wrong key aborts before anything is touched; the right key restores
+# through a side database and leaves a safety dump of what it replaced.
+live_sql() { run "docker compose exec -T db psql -U quickly -d quickly -At -c \"$1\" </dev/null" | tr -d '\r '; }
+live_sql 'create table qk_sentinel(x int)' >/dev/null           # exists only in the live DB, not in the backup
+run 'age-keygen -o /tmp/wrong.key 2>/dev/null'
+if run '{ echo RESTORE; grep AGE-SECRET-KEY /tmp/wrong.key; } | bash scripts/restore-prod.sh' >/dev/null 2>&1; then
+  die "D3b wrong key accepted"
+fi
+run '. scripts/lib.sh; load_env; wait_healthy 60' || die "D3b app not running after wrong key"
+[ "$(live_sql "select to_regclass('qk_sentinel')")" = qk_sentinel ] || die "D3b live data changed by a wrong key"
+[ -z "$(run 'ls state/pre-restore-* 2>/dev/null || true')" ] || die "D3b safety dump taken before validation"
+[ "$(live_sql "select count(*) from pg_database where datname='quickly_restore'")" = 0 ] || die "D3b side database left behind"
+run '{ echo RESTORE; grep AGE-SECRET-KEY /tmp/age.key; } | bash scripts/restore-prod.sh' >/dev/null || die "D3b restore"
+[ -z "$(live_sql "select to_regclass('qk_sentinel')")" ] || die "D3b live DB was not replaced by the backup"
+[ -n "$(run 'ls state/pre-restore-*.pgc.age')" ] || die "D3b no safety dump"
+[ "$(live_sql "select count(*) from pg_database where datname='quickly_restore'")" = 0 ] || die "D3b side database left behind after restore"
+run '. scripts/lib.sh; load_env; wait_healthy 60' && pass D3b || die "D3b app not healthy after restore"
 
 # D4 — one alert after the 2nd failed check, none on the 3rd, one on recovery
 base=$(tg_count)
