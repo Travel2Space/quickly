@@ -88,9 +88,11 @@ async def missing_vars_report(db, campaign_id: int) -> dict:
     """Before anything is sent: how many enrolled leads lack which template variables."""
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
-    from app.models import CampaignLead, Lead, Sequence
+    from app.models import Campaign, CampaignLead, Lead, Sequence
     from app.sender import _BUILTIN_TEMPLATE_VARS, get_lead_data
 
+    campaign = await db.get(Campaign, campaign_id)
+    own_tpl = (getattr(campaign, "list_unsubscribe_url_template", None) or "").strip()
     seqs = (await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.campaign_id == campaign_id)
     )).scalars().all()
@@ -98,7 +100,10 @@ async def missing_vars_report(db, campaign_id: int) -> dict:
     for s in seqs:
         texts += [s.subject, s.body, s.preview_text, s.fallback_subject, s.fallback_body]
         texts += [t for v in s.variants if v.enabled for t in (v.subject, v.body, v.preview_text)]
-    needed = template_var_names(*texts) - _BUILTIN_TEMPLATE_VARS - {"unsubscribe_link"}
+    if own_tpl:
+        texts.append(own_tpl)
+    # With an own unsubscribe URL the built-in {{unsubscribe_link}} does not exist.
+    needed = template_var_names(*texts) - _BUILTIN_TEMPLATE_VARS - (set() if own_tpl else {"unsubscribe_link"})
     if not needed:
         return {"leads_missing": 0, "variables": {}}
     leads = (await db.execute(

@@ -339,6 +339,7 @@ def _build_email_message(
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
 ) -> EmailMessage:
     """Build an EmailMessage using Python's stdlib email module (policy.SMTP)."""
     msg = EmailMessage(policy=email.policy.SMTP)
@@ -379,7 +380,10 @@ def _build_email_message(
         msg["References"] = references or ref
 
     if list_unsubscribe_url:
-        msg["List-Unsubscribe"] = f"<{list_unsubscribe_url}>"
+        targets = [f"<{list_unsubscribe_url}>"]
+        if list_unsubscribe_mailto:
+            targets.append(f"<mailto:{list_unsubscribe_mailto}?subject=unsubscribe>")
+        msg["List-Unsubscribe"] = ", ".join(targets)
         # RFC 8058 one-click unsubscribe.  Gmail/Yahoo require it for bulk
         # senders, but some senders prefer to omit it because Gmail's tab
         # classifier can treat one-click mail as Promotions.  Opt-out is
@@ -402,6 +406,7 @@ def build_raw_mime(
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
 ) -> str:
     """
     Build a raw RFC 2822 MIME string and return it base64url-encoded for
@@ -426,6 +431,7 @@ def build_raw_mime(
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
         list_unsubscribe_one_click=list_unsubscribe_one_click,
+        list_unsubscribe_mailto=list_unsubscribe_mailto,
     )
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
@@ -444,6 +450,7 @@ def _send_via_gmail(
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
     google_client_id: str = "",
     google_client_secret: str = "",
     retry_on_auth_fail: bool = True,
@@ -527,6 +534,7 @@ def _send_via_gmail(
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
         list_unsubscribe_one_click=list_unsubscribe_one_click,
+        list_unsubscribe_mailto=list_unsubscribe_mailto,
     )
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
@@ -645,6 +653,7 @@ def _send_via_gmail(
                         thread_id=thread_id,
                         list_unsubscribe_url=list_unsubscribe_url,
                         list_unsubscribe_one_click=list_unsubscribe_one_click,
+                        list_unsubscribe_mailto=list_unsubscribe_mailto,
                         google_client_id=google_client_id,
                         google_client_secret=google_client_secret,
                         retry_on_auth_fail=False,
@@ -693,6 +702,7 @@ def send_email(
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
     google_client_id: str = "",
     google_client_secret: str = "",
     office365_account: Optional[Office365Account] = None,
@@ -752,6 +762,7 @@ def send_email(
             smtp_account=smtp_account,
             list_unsubscribe_url=list_unsubscribe_url,
             list_unsubscribe_one_click=list_unsubscribe_one_click,
+            list_unsubscribe_mailto=list_unsubscribe_mailto,
         )
 
     if provider == "office365":
@@ -771,6 +782,7 @@ def send_email(
             conversation_id=conversation_id,
             list_unsubscribe_url=list_unsubscribe_url,
             list_unsubscribe_one_click=list_unsubscribe_one_click,
+            list_unsubscribe_mailto=list_unsubscribe_mailto,
             office365_client_id=office365_client_id,
             office365_client_secret=office365_client_secret,
             office365_tenant_id=office365_tenant_id,
@@ -796,6 +808,7 @@ def send_email(
         thread_id=thread_id,
         list_unsubscribe_url=list_unsubscribe_url,
         list_unsubscribe_one_click=list_unsubscribe_one_click,
+        list_unsubscribe_mailto=list_unsubscribe_mailto,
         google_client_id=google_client_id,
         google_client_secret=google_client_secret,
     )
@@ -849,6 +862,7 @@ def _send_via_office365(
     conversation_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
     office365_client_id: str = "",
     office365_client_secret: str = "",
     office365_tenant_id: str = "",
@@ -899,6 +913,7 @@ def _send_via_office365(
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
         list_unsubscribe_one_click=list_unsubscribe_one_click,
+        list_unsubscribe_mailto=list_unsubscribe_mailto,
     )
     raw_mime: bytes = mime_msg.as_bytes()
 
@@ -1040,6 +1055,7 @@ def _send_via_office365(
                         conversation_id=conversation_id,
                         list_unsubscribe_url=list_unsubscribe_url,
                         list_unsubscribe_one_click=list_unsubscribe_one_click,
+                        list_unsubscribe_mailto=list_unsubscribe_mailto,
                         office365_client_id=office365_client_id,
                         office365_client_secret=office365_client_secret,
                         office365_tenant_id=office365_tenant_id,
@@ -1116,6 +1132,7 @@ def _send_via_smtp(
     smtp_account: SmtpAccount | None = None,
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_one_click: bool = True,
+    list_unsubscribe_mailto: Optional[str] = None,
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via a generic SMTP relay (stdlib ``smtplib``).
 
@@ -1146,6 +1163,7 @@ def _send_via_smtp(
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
         list_unsubscribe_one_click=list_unsubscribe_one_click,
+        list_unsubscribe_mailto=list_unsubscribe_mailto,
     )
     raw_bytes: bytes = mime_msg.as_bytes()
     # Thread key: the root message of the chain (first References entry) or

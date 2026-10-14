@@ -1,5 +1,5 @@
 """Pydantic schemas for API and validation."""
-from pydantic import AliasChoices, BaseModel, EmailStr, Field
+from pydantic import AliasChoices, BaseModel, EmailStr, Field, field_validator
 from typing import Literal, Optional, Dict, Any, List
 from datetime import datetime, time
 from app.models import WEBHOOK_EVENT_TYPES
@@ -293,6 +293,21 @@ class CampaignCreate(BaseModel):
     add_unsubscribe_header: bool = True
     # Include the RFC 8058 one-click header (List-Unsubscribe-Post)
     add_one_click_unsubscribe: bool = True
+    list_unsubscribe_url_template: Optional[str] = None
+    list_unsubscribe_mailto: Optional[str] = None
+
+    @field_validator("list_unsubscribe_url_template")
+    @classmethod
+    def _https_template(cls, v):
+        v = (v or "").strip() or None
+        if v and not v.startswith("https://"):
+            raise ValueError("list_unsubscribe_url_template must start with https://")
+        return v
+
+    @field_validator("list_unsubscribe_mailto")
+    @classmethod
+    def _clean_mailto(cls, v):
+        return (v or "").strip() or None
     # Plain-text options
     send_first_as_text: bool = False
     send_all_as_text: bool = False
@@ -318,6 +333,21 @@ class CampaignUpdate(BaseModel):
     track_clicks: Optional[bool] = None
     add_unsubscribe_header: Optional[bool] = None
     add_one_click_unsubscribe: Optional[bool] = None
+    list_unsubscribe_url_template: Optional[str] = None
+    list_unsubscribe_mailto: Optional[str] = None
+
+    @field_validator("list_unsubscribe_url_template")
+    @classmethod
+    def _https_template(cls, v):
+        v = (v or "").strip() or None
+        if v and not v.startswith("https://"):
+            raise ValueError("list_unsubscribe_url_template must start with https://")
+        return v
+
+    @field_validator("list_unsubscribe_mailto")
+    @classmethod
+    def _clean_mailto(cls, v):
+        return (v or "").strip() or None
     send_first_as_text: Optional[bool] = None
     send_all_as_text: Optional[bool] = None
     timezone: Optional[str] = None
@@ -377,6 +407,8 @@ class CampaignResponse(BaseModel):
     track_clicks: bool = False
     add_unsubscribe_header: bool = True
     add_one_click_unsubscribe: bool = True
+    list_unsubscribe_url_template: Optional[str] = None
+    list_unsubscribe_mailto: Optional[str] = None
     send_first_as_text: bool = False
     send_all_as_text: bool = False
     timezone: Optional[str] = None

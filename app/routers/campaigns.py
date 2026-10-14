@@ -100,6 +100,8 @@ def _campaign_to_response(
         track_clicks=bool(getattr(campaign, 'track_clicks', False)),
         add_unsubscribe_header=bool(getattr(campaign, 'add_unsubscribe_header', True)),
         add_one_click_unsubscribe=bool(getattr(campaign, 'add_one_click_unsubscribe', True)),
+        list_unsubscribe_url_template=getattr(campaign, 'list_unsubscribe_url_template', None),
+        list_unsubscribe_mailto=getattr(campaign, 'list_unsubscribe_mailto', None),
         send_first_as_text=bool(getattr(campaign, 'send_first_as_text', False)),
         send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
         timezone=getattr(campaign, 'timezone', None),
@@ -298,6 +300,8 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         track_clicks=data.track_clicks,
         add_unsubscribe_header=data.add_unsubscribe_header,
         add_one_click_unsubscribe=data.add_one_click_unsubscribe,
+        list_unsubscribe_url_template=data.list_unsubscribe_url_template,
+        list_unsubscribe_mailto=data.list_unsubscribe_mailto,
         send_first_as_text=data.send_first_as_text,
         send_all_as_text=data.send_all_as_text,
         timezone=data.timezone,
@@ -560,6 +564,15 @@ async def update_campaign(
         campaign.add_unsubscribe_header = data.add_unsubscribe_header
     if data.add_one_click_unsubscribe is not None:
         campaign.add_one_click_unsubscribe = data.add_one_click_unsubscribe
+    # Own unsubscribe endpoint: null/empty clears it. Slots parked for a missing
+    # token/link are retried only when the template really changed.
+    if "list_unsubscribe_url_template" in data.model_fields_set:
+        if campaign.list_unsubscribe_url_template != data.list_unsubscribe_url_template:
+            campaign.list_unsubscribe_url_template = data.list_unsubscribe_url_template
+            await db.flush()
+            await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    if "list_unsubscribe_mailto" in data.model_fields_set:
+        campaign.list_unsubscribe_mailto = data.list_unsubscribe_mailto
     if data.send_first_as_text is not None:
         campaign.send_first_as_text = data.send_first_as_text
     if data.send_all_as_text is not None:
@@ -641,6 +654,8 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
         track_clicks=original.track_clicks,
         add_unsubscribe_header=original.add_unsubscribe_header,
         add_one_click_unsubscribe=original.add_one_click_unsubscribe,
+        list_unsubscribe_url_template=original.list_unsubscribe_url_template,
+        list_unsubscribe_mailto=original.list_unsubscribe_mailto,
         send_first_as_text=original.send_first_as_text,
         send_all_as_text=original.send_all_as_text,
         match_lead_provider=original.match_lead_provider,

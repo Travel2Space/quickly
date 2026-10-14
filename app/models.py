@@ -182,6 +182,10 @@ class Campaign(Base):
     # RFC 8058 one-click header (List-Unsubscribe-Post). Required by Gmail/Yahoo
     # bulk-sender rules; disable if Gmail's Promotions classifier is an issue.
     add_one_click_unsubscribe = Column(Boolean, default=True, nullable=False)
+    # Own unsubscribe endpoint (Q-1). When set, List-Unsubscribe points here (rendered per
+    # lead, strict) and the built-in /u/ link and token are not used for this campaign.
+    list_unsubscribe_url_template = Column(String(1024), nullable=True, default=None)
+    list_unsubscribe_mailto = Column(String(255), nullable=True, default=None)
     # Plain-text sending options
     send_first_as_text = Column(Boolean, default=False, nullable=False)  # Force seq 0 to plain text
     send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text

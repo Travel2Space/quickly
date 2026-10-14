@@ -703,32 +703,32 @@ async def run_send_job():
                         format_override = "tracking_upgraded_to_html"
 
                 # ── Unsubscribe token (fetch or create) ──────────────────────
-                unsub_token_res = await session.execute(
-                    select(LeadUnsubscribeToken).where(
-                        LeadUnsubscribeToken.lead_id == lead.id,
-                        LeadUnsubscribeToken.campaign_id == campaign.id,
-                    )
-                )
-                unsub_row = unsub_token_res.scalar_one_or_none()
-                if unsub_row is None:
-                    unsub_row = LeadUnsubscribeToken(
-                        lead_id=lead.id,
-                        campaign_id=campaign.id,
-                        token=secrets.token_urlsafe(32),
-                    )
-                    session.add(unsub_row)
-                    await session.flush()  # get the token persisted
-
-                unsub_url = f"{inbox_tracking_base}/u/{unsub_row.token}"
-
-                # Build lead data dict with built-in unsubscribe_link variable
+                own_unsub_tpl = (getattr(campaign, "list_unsubscribe_url_template", None) or "").strip()
                 lead_data = get_lead_data(lead)
-                lead_data["unsubscribe_link"] = unsub_url
+                unsub_row = None
+                if not own_unsub_tpl:
+                    unsub_token_res = await session.execute(
+                        select(LeadUnsubscribeToken).where(
+                            LeadUnsubscribeToken.lead_id == lead.id,
+                            LeadUnsubscribeToken.campaign_id == campaign.id,
+                        )
+                    )
+                    unsub_row = unsub_token_res.scalar_one_or_none()
+                    if unsub_row is None:
+                        unsub_row = LeadUnsubscribeToken(
+                            lead_id=lead.id,
+                            campaign_id=campaign.id,
+                            token=secrets.token_urlsafe(32),
+                        )
+                        session.add(unsub_row)
+                        await session.flush()  # get the token persisted
+                    lead_data["unsubscribe_link"] = f"{inbox_tracking_base}/u/{unsub_row.token}"
 
                 try:
                     rendered = render_all_strict(
                         {"subject": subject, "body": seq_body,
-                         "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                         "preview": seq_preview_text if (is_html and seq_preview_text) else None,
+                         "unsub_url": own_unsub_tpl or None},
                         lead_data,
                     )
                 except MissingTemplateVars as exc:
@@ -793,9 +793,9 @@ async def run_send_job():
                     from app.beacon_client import register_beacon_mappings
 
                     iid = inbox.id
-                    b_items: list[dict] = [
-                        {"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid}
-                    ]
+                    b_items: list[dict] = []
+                    if unsub_row is not None:
+                        b_items.append({"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid})
                     if do_track:
                         b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token, "inbox_id": iid})
                         for _token, _url in link_pairs:
@@ -829,7 +829,10 @@ async def run_send_job():
                             )
 
                 # Unsubscribe header
-                list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
+                own_unsub_url = rendered["unsub_url"] if own_unsub_tpl else None
+                default_unsub_url = lead_data.get("unsubscribe_link")
+                list_unsub_url = (own_unsub_url or default_unsub_url) if getattr(campaign, 'add_unsubscribe_header', True) else None
+                list_unsub_mailto = (getattr(campaign, "list_unsubscribe_mailto", None) or None) if own_unsub_tpl else None
                 list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
                 # ── phase 3: send ────────────────────────────────────────────
@@ -868,6 +871,7 @@ async def run_send_job():
                             thread_id=prev_thread_id,
                             list_unsubscribe_url=list_unsub_url,
                             list_unsubscribe_one_click=list_unsub_one_click,
+                            list_unsubscribe_mailto=list_unsub_mailto,
                             google_client_id=g_client_id,
                             google_client_secret=g_client_secret,
                             office365_account=o365_account,
@@ -1564,30 +1568,34 @@ async def send_slot_job(slot_id: int) -> None:
                 format_override = "tracking_upgraded_to_html"
 
         # ── Unsubscribe token ─────────────────────────────────────────────
-        unsub_token_res = await session.execute(
-            select(LeadUnsubscribeToken).where(
-                LeadUnsubscribeToken.lead_id == lead.id,
-                LeadUnsubscribeToken.campaign_id == campaign.id,
-            )
-        )
-        unsub_row = unsub_token_res.scalar_one_or_none()
-        if unsub_row is None:
-            unsub_row = LeadUnsubscribeToken(
-                lead_id=lead.id,
-                campaign_id=campaign.id,
-                token=secrets.token_urlsafe(32),
-            )
-            session.add(unsub_row)
-            await session.flush()
-
-        unsub_url = f"{inbox_tracking_base}/u/{unsub_row.token}"
+        # A campaign with its own unsubscribe URL template uses neither the built-in
+        # /u/ link nor a token row (Q-1).
+        own_unsub_tpl = (getattr(campaign, "list_unsubscribe_url_template", None) or "").strip()
         lead_data = get_lead_data(lead)
-        lead_data["unsubscribe_link"] = unsub_url
+        unsub_row = None
+        if not own_unsub_tpl:
+            unsub_token_res = await session.execute(
+                select(LeadUnsubscribeToken).where(
+                    LeadUnsubscribeToken.lead_id == lead.id,
+                    LeadUnsubscribeToken.campaign_id == campaign.id,
+                )
+            )
+            unsub_row = unsub_token_res.scalar_one_or_none()
+            if unsub_row is None:
+                unsub_row = LeadUnsubscribeToken(
+                    lead_id=lead.id,
+                    campaign_id=campaign.id,
+                    token=secrets.token_urlsafe(32),
+                )
+                session.add(unsub_row)
+                await session.flush()
+            lead_data["unsubscribe_link"] = f"{inbox_tracking_base}/u/{unsub_row.token}"
 
         try:
             rendered = render_all_strict(
                 {"subject": subject, "body": seq_body,
-                 "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                 "preview": seq_preview_text if (is_html and seq_preview_text) else None,
+                 "unsub_url": own_unsub_tpl or None},
                 lead_data,
             )
         except MissingTemplateVars as exc:
@@ -1645,9 +1653,9 @@ async def send_slot_job(slot_id: int) -> None:
             from app.beacon_client import register_beacon_mappings
 
             iid = inbox.id
-            b_items: list[dict] = [
-                {"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid}
-            ]
+            b_items: list[dict] = []
+            if unsub_row is not None:
+                b_items.append({"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid})
             if do_track:
                 b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token, "inbox_id": iid})
                 for _token, _url in link_pairs:
@@ -1676,7 +1684,10 @@ async def send_slot_job(slot_id: int) -> None:
                 if _prev_plain:
                     send_body = send_body + build_quote_plain(_prev_plain, _from_name, _from_email, prev_sent_at)
 
-        list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
+        own_unsub_url = rendered["unsub_url"] if own_unsub_tpl else None
+        default_unsub_url = lead_data.get("unsubscribe_link")
+        list_unsub_url = (own_unsub_url or default_unsub_url) if getattr(campaign, "add_unsubscribe_header", True) else None
+        list_unsub_mailto = (getattr(campaign, "list_unsubscribe_mailto", None) or None) if own_unsub_tpl else None
         list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
         # ── Send ──────────────────────────────────────────────────────────
@@ -1713,6 +1724,7 @@ async def send_slot_job(slot_id: int) -> None:
                     thread_id=prev_thread_id,
                     list_unsubscribe_url=list_unsub_url,
                     list_unsubscribe_one_click=list_unsub_one_click,
+                    list_unsubscribe_mailto=list_unsub_mailto,
                     google_client_id=g_client_id,
                     google_client_secret=g_client_secret,
                     office365_account=o365_account,

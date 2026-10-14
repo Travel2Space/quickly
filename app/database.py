@@ -216,6 +216,8 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE lead ADD COLUMN IF NOT EXISTS suppressed_at TIMESTAMP WITHOUT TIME ZONE NULL",
         "ALTER TABLE lead ADD COLUMN IF NOT EXISTS suppressed_reason VARCHAR(64) NULL",
         "CREATE INDEX IF NOT EXISTS ix_lead_suppressed_at ON lead (suppressed_at)",
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS list_unsubscribe_url_template VARCHAR(1024) NULL",
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS list_unsubscribe_mailto VARCHAR(255) NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)
