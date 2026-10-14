@@ -19,7 +19,7 @@ cleanup() {
   docker rm -f qk-s3 qk-faketg "$R" qk-restore-drill >/dev/null 2>&1 || true
   docker rmi quickly:v0.0.2 >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -rf "$KIT/.env" "$KIT/state"
+  rm -rf "$KIT/.env" "$KIT/ops.env" "$KIT/state"
 }
 trap cleanup EXIT
 cleanup
@@ -43,6 +43,8 @@ POSTGRES_PASSWORD=ci
 BASE_URL=http://localhost:5059
 QUICKLY_SECRET_KEY=$(openssl rand -hex 32)
 QUICKLY_ENCRYPTION_KEY=$(openssl rand -base64 32 | tr "+/" "-_")
+EOF
+  cat > ops.env <<EOF
 BACKUP_AGE_PUBLIC_KEY=$pub
 R2_ENDPOINT=http://qk-s3:8333
 R2_REGION=us-east-1
@@ -63,7 +65,10 @@ EOF'
 # D1 — the stack starts and answers /health
 run 'docker compose up -d >/dev/null 2>&1 && docker network connect quickly_default qk-runner'
 run 'for i in $(seq 60); do curl -fs http://app:8000/health && exit 0; sleep 2; done; exit 1' | grep '"ok"' >/dev/null || die D1
-curl -fs http://127.0.0.1:5059/health | grep '"ok"' >/dev/null && pass D1 || die "D1 loopback publish"   # from the host
+curl -fs http://127.0.0.1:5059/health | grep '"ok"' >/dev/null || die "D1 loopback publish"   # from the host
+# ops secrets (ops.env) must not reach the app container
+if docker exec quickly-app-1 env | grep -E '^(R2_|TELEGRAM_|BACKUP_AGE_)' >/dev/null; then die "D1 ops secrets leaked into the app"; fi
+pass D1
 
 # D2 — encrypted backup lands in the bucket with a manifest
 run '. scripts/lib.sh; load_env; aws_r2 s3 mb "s3://$R2_BUCKET" >/dev/null'

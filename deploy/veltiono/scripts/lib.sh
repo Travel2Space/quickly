@@ -12,11 +12,17 @@ STATE_DIR="${STATE_DIR:-$DEPLOY_DIR/state}"
 mkdir -p "$STATE_DIR"
 
 load_env() {
-  [ -f "$DEPLOY_DIR/.env" ] || { echo "missing $DEPLOY_DIR/.env" >&2; exit 2; }
+  local f
+  for f in .env ops.env; do
+    [ -f "$DEPLOY_DIR/$f" ] || { echo "missing $DEPLOY_DIR/$f" >&2; exit 2; }
+  done
   cd "$DEPLOY_DIR"   # cron starts in /; COMPOSE_FILE paths are relative to this directory
   set -a
   # shellcheck disable=SC1091
   . "$DEPLOY_DIR/.env"
+  # ops.env: backup/R2/Telegram secrets, kept out of the app container's env_file.
+  # shellcheck disable=SC1091
+  . "$DEPLOY_DIR/ops.env"
   set +a
 }
 

@@ -28,11 +28,15 @@ Telegram ops-чат. Масштабировать нельзя: планиров
 git clone --depth 1 https://github.com/Travel2Space/quickly /opt/quickly-src
 mkdir -p /opt/quickly && cp -r /opt/quickly-src/deploy/veltiono/. /opt/quickly/
 cd /opt/quickly
-cp .env.example .env && chmod 600 .env
+cp .env.example .env && cp ops.env.example ops.env && chmod 600 .env ops.env
 ```
 
 Обновить скрипты позже: `git -C /opt/quickly-src pull && cp -r /opt/quickly-src/deploy/veltiono/. /opt/quickly/`.
-`.env` и `state/` при этом не затираются: их нет в репозитории.
+`.env`, `ops.env` и `state/` при этом не затираются: их нет в репозитории.
+
+`.env` — настройки приложения и compose: файл целиком попадает в контейнер `app`. Секреты бэкапа и
+алертов (R2, Telegram, публичный ключ age) лежат отдельно, в `ops.env`: их читают только скрипты на
+хосте, приложению они не нужны. Скрипты без `ops.env` не запускаются.
 
 Генерация значений:
 
@@ -92,7 +96,7 @@ curl -s https://outreach.veltiono.eu/health    # → {"ok":true}
 ## 8. Бэкапы (R2)
 
 - В Cloudflare R2 создать API token с правом Object Read & Write **только на бакет** `veltiono-backups`.
-- `BACKUP_AGE_PUBLIC_KEY` — тот же публичный ключ, что в GitHub secret `BACKUP_AGE_PUBLIC_KEY`
+- `BACKUP_AGE_PUBLIC_KEY` и `R2_*` — в `ops.env`. Ключ — тот же публичный ключ, что в GitHub secret `BACKUP_AGE_PUBLIC_KEY`
   веб-бэкапа. Приватный ключ на сервер не попадает никогда.
 - Первый прогон вручную: `bash scripts/backup.sh`, затем проверить в R2 появление `quickly/<дата>/`
   с файлами `dump.pgc.age` и `manifest.json`.
@@ -102,7 +106,7 @@ curl -s https://outreach.veltiono.eu/health    # → {"ok":true}
 1. Создать чат, добавить бота.
 2. Узнать `chat_id`: написать в чат сообщение и открыть
    `https://api.telegram.org/bot<TOKEN>/getUpdates`.
-3. Вписать `TELEGRAM_BOT_TOKEN` и `TELEGRAM_OPS_CHAT_ID` в `.env`.
+3. Вписать `TELEGRAM_BOT_TOKEN` и `TELEGRAM_OPS_CHAT_ID` в `ops.env`.
 4. Проверка: `bash scripts/heartbeat.sh` — в чат должно прийти сообщение «жив».
 
 ## 10. Cron и logrotate
