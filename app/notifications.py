@@ -158,6 +158,22 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
             f"**{lead_email}** has no value for: **{missing}**. The email is held; it goes out "
             f"after you fill these in on the lead (or fix the step)."
         )
+    elif event_type == "presend.denied":
+        lead_email = data.get("lead_email", "a lead")
+        title = f"Send refused by pre-send check — {lead_email}"
+        if data.get("suppressed"):
+            message = f"The pre-send check answered **{data.get('reason')}**. The address is now suppressed in every campaign."
+        else:
+            message = (
+                f"The pre-send check answered **{data.get('reason')}** — a data problem, not an opt-out. "
+                f"Sending to this lead is paused in this campaign; fix the lead and resume it."
+            )
+    elif event_type == "presend.unavailable":
+        title = "Pre-send check unavailable — sending is on hold"
+        message = (
+            f"No usable answer from the pre-send URL ({data.get('error')}). Emails stay queued and "
+            f"go out once it answers again."
+        )
     else:
         title = f"Quickly notification — {event_type}"
         message = f"Event: {event_type} at {ts}"

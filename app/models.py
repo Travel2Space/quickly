@@ -973,4 +973,6 @@ WEBHOOK_EVENT_TYPES = [
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
     "send.step_missing",   # A queued email points at a step the campaign no longer has
     "send.blocked_missing_vars",  # A lead lacks template variables; its email is held
+    "presend.denied",      # The pre-send check refused an email (see data.reason, data.suppressed)
+    "presend.unavailable", # The pre-send check gave no usable answer; emails are held
 ]

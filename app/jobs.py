@@ -11,7 +11,7 @@ import re
 import secrets
 from datetime import datetime, date, time, timedelta
 from email.utils import make_msgid
-from sqlalchemy import select, func
+from sqlalchemy import delete as sql_delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 try:
@@ -40,7 +40,8 @@ from app.models import (
 )
 from app.sender import MissingTemplateVars, send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
-from app.send_prep import notify_once, render_all_strict, reply_subject
+from app.presend import PresendNoToken, PresendUnavailable, load_presend_config, presend_check
+from app.send_prep import notify_once, render_all_strict, reply_subject, reset_notify
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -445,6 +446,8 @@ async def run_send_job():
                     if reply_check.scalar_one_or_none():
                         await session.delete(slot)
                         continue
+                if not await _presend_allows(session, slot, campaign, cl, lead):
+                    continue
 
                 reply_to_msg_id = None
                 prev_thread_id = None
@@ -1128,6 +1131,47 @@ async def run_send_job():
 # Per-slot job: fired by APScheduler at the slot's exact scheduled_date
 # ---------------------------------------------------------------------------
 
+async def _presend_allows(session, slot, campaign, cl, lead) -> bool:
+    """Q-4: ask the pre-send hook (if configured). False = the email must not go out now.
+
+    Outage / missing token: the slot stays queued and the operator is told (once per
+    incident). Refusal: an opt-out reason suppresses the address everywhere; any other
+    reason stops only this enrollment so the data can be fixed and the enrollment resumed.
+    """
+    cfg = await load_presend_config(session)
+    if cfg is None:
+        return True
+    try:
+        allowed, reason = await presend_check(cfg, lead=lead, campaign_id=campaign.id, step=slot.sequence_index)
+    except PresendUnavailable as exc:
+        log.warning("send: pre-send gave no answer (%s); slot %d kept", exc, slot.id)
+        no_token = isinstance(exc, PresendNoToken)
+        key = ("presend_no_token", lead.id) if no_token else "presend_down"
+        if notify_once(key, min_gap=0 if no_token else 3600):
+            await fire_webhook_event(session, "presend.unavailable", {
+                "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
+                "error": str(exc)[:200],
+            })
+            await session.commit()
+        return False
+    reset_notify("presend_down")
+    if allowed:
+        return True
+    suppressed = reason in cfg.suppress_reasons
+    if suppressed:
+        await suppress_email(session, lead.email, f"presend:{reason}")
+    else:
+        cl.sending_paused = True
+        await session.execute(sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+    await fire_webhook_event(session, "presend.denied", {
+        "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
+        "reason": reason, "suppressed": suppressed,
+    })
+    await session.commit()
+    log.info("send: pre-send refused lead %d (%s); suppressed=%s", lead.id, reason, suppressed)
+    return False
+
+
 async def _block_slot_missing_vars(session, slot, campaign, lead, names: list[str]) -> None:
     """Park a slot whose templates have unfilled variables (Q-5): nothing is sent."""
     slot.blocked_missing_vars = names
@@ -1314,6 +1358,10 @@ async def send_slot_job(slot_id: int) -> None:
                 await session.delete(slot)
                 await session.commit()
                 return
+
+        # ── Pre-send hook (Q-4) ──────────────────────────────────────────
+        if not await _presend_allows(session, slot, campaign, cl, lead):
+            return
 
         # ── OAuth credentials ────────────────────────────────────────────
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)

@@ -18,7 +18,9 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
+from app.presend import PresendUnavailable, load_presend_config, presend_check
 from app.send_prep import clear_missing_var_blocks, missing_vars_report, reset_campaign_incidents
+from app.suppression import is_suppressed
 from app.models import (
     Campaign,
     Sequence,
@@ -1682,6 +1684,31 @@ class TestEmailRequest(BaseModel):
     variant_id: int | None = None  # If set, send this A/B variant's content
 
 
+async def _check_test_email_recipient(db: AsyncSession, campaign_id: int, seq, to_email: str) -> None:
+    """A test email to an address that is a lead is checked like a send to that lead (Q-3/Q-4).
+
+    An address that is not among the leads is the operator's own test address and goes out
+    as before; asking the pre-send hook about it would answer email_mismatch every time.
+    """
+    to_norm = to_email.strip().lower()
+    if await is_suppressed(db, to_norm):
+        raise HTTPException(422, "address is suppressed")
+    cfg = await load_presend_config(db)
+    if cfg is None:
+        return
+    target = (await db.execute(
+        select(Lead).where(func.lower(Lead.email) == to_norm).order_by(Lead.id).limit(1)
+    )).scalar_one_or_none()
+    if target is None:
+        return
+    try:
+        allowed, reason = await presend_check(cfg, lead=target, campaign_id=campaign_id, step=seq.position)
+    except PresendUnavailable as exc:
+        raise HTTPException(503, f"pre-send check unavailable: {exc}")
+    if not allowed:
+        raise HTTPException(422, f"pre-send check refused: {reason}")
+
+
 @router.post("/{campaign_id}/send-test")
 async def send_test_email(
     campaign_id: int,
@@ -1705,6 +1732,8 @@ async def send_test_email(
     campaign = camp_result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
+
+    await _check_test_email_recipient(db, campaign_id, seq, data.to_email)
 
     # Get the first inbox for this campaign
     inbox_res = await db.execute(
