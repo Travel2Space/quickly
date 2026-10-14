@@ -27,6 +27,7 @@ on:
 
 jobs:
   build:
+    if: github.repository == 'AbdelftahZowail/Quickly'
     strategy:
       matrix:
         include:
