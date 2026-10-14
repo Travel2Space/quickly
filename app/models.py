@@ -948,6 +948,7 @@ WEBHOOK_EVENT_TYPES = [
     "email.opened",        # A lead opened an email (tracking pixel loaded)
     "email.clicked",       # A lead clicked a link in an email
     "email.bounced",       # An email bounced (permanent delivery failure)
+    "reply.ambiguous_sender",  # A reply came from an address shared by several leads; none attached
     "lead.replied",        # A lead replied to a campaign email
     "lead.unsubscribed",   # A lead clicked the unsubscribe link
     "lead.status_changed", # A lead's status was changed (any status transition)

@@ -181,6 +181,45 @@ async def _single_lead_campaign_pair_for_thread(
     return next(iter(pairs))
 
 
+_REPLY_CHAIN_LIMIT = 10
+
+
+async def _lead_campaign_from_chain(
+    db: AsyncSession, in_reply_to: str | None, references: list[str] | None
+) -> tuple[int, int] | None:
+    """Exact attribution: the newest Message-ID in In-Reply-To/References that WE sent."""
+    ids: list[str] = []
+    for mid in [in_reply_to, *reversed(references or [])]:  # References run oldest -> newest
+        if mid and mid not in ids:
+            ids.append(mid)
+    ids = ids[:_REPLY_CHAIN_LIMIT]
+    if not ids:
+        return None
+    rows = (await db.execute(
+        select(EmailLog.message_id, EmailLog.lead_id, EmailLog.campaign_id).where(EmailLog.message_id.in_(ids))
+    )).all()
+    found = {mid: (lead_id, camp_id) for mid, lead_id, camp_id in rows}
+    return next((found[m] for m in ids if m in found), None)
+
+
+async def _lead_by_sender(
+    db: AsyncSession, from_addr: str, *, inbox_id: int, inbox_email: str, thread_id: str
+) -> Lead | None:
+    """Fallback attribution by From. Several leads share the address -> attach none, notify."""
+    if not from_addr:
+        return None
+    leads = (await db.execute(select(Lead).where(func.lower(Lead.email) == from_addr))).scalars().all()
+    if len(leads) == 1:
+        return leads[0]
+    if len(leads) > 1:
+        from app.webhooks import fire_webhook_event as _fwe
+        await _fwe(db, "reply.ambiguous_sender", {
+            "inbox_id": inbox_id, "inbox_email": inbox_email, "from_email": from_addr,
+            "lead_count": len(leads), "thread_id": thread_id,
+        })
+    return None
+
+
 def _extract_email_only(header_value: str) -> str:
     """Extract bare email address from a From/To header value.
 
@@ -926,11 +965,19 @@ async def _upsert_message_from_gmail(
         lead: Lead | None = None
         campaign_ids_from_thread_only: list[int] | None = None
 
-        if from_email_addr:
-            lead_res = await db.execute(
-                select(Lead).where(func.lower(Lead.email) == from_email_addr)
+        chain_hit = await _lead_campaign_from_chain(
+            db,
+            _header_value(headers_json, "In-Reply-To").strip() or None,
+            _header_value(headers_json, "References").split(),
+        )
+        if chain_hit is not None:
+            lead = (await db.execute(select(Lead).where(Lead.id == chain_hit[0]))).scalar_one_or_none()
+            if lead is not None:
+                campaign_ids_from_thread_only = [chain_hit[1]]
+        if lead is None and from_email_addr:
+            lead = await _lead_by_sender(
+                db, from_email_addr, inbox_id=inbox_id, inbox_email="", thread_id=thread_id,
             )
-            lead = lead_res.scalar_one_or_none()
 
         if lead is None:
             pair = await _single_lead_campaign_pair_for_thread(db, thread_id)
@@ -1145,7 +1192,7 @@ async def _upsert_message_from_gmail(
             to_lead_res = await db.execute(
                 select(Lead).where(func.lower(Lead.email) == to_email_addr)
             )
-            to_lead = to_lead_res.scalar_one_or_none()
+            to_lead = to_lead_res.scalars().first()
             if to_lead is not None:
                 sent_thread_res = await db.execute(
                     select(GmailThread).where(
@@ -1319,7 +1366,7 @@ async def upsert_sent_o365_message(
 
     # Mark the thread as a lead thread if the recipient is a known lead.
     lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == to_email.lower()))
-    to_lead = lead_res.scalar_one_or_none()
+    to_lead = lead_res.scalars().first()
     if to_lead is not None and not thread.is_lead_thread:
         thread.is_lead_thread = True
 
@@ -1438,7 +1485,7 @@ async def upsert_sent_smtp_message(
     db.add(row)
 
     lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == (to_email or "").lower()))
-    to_lead = lead_res.scalar_one_or_none()
+    to_lead = lead_res.scalars().first()
     if to_lead is not None:
         thread_res = await db.execute(
             select(SmtpThread).where(
@@ -1714,9 +1761,13 @@ async def _process_smtp_inbound_message(
     # ---------- Lead-reply detection ----------
     lead: Lead | None = None
     campaign_ids_from_thread_only: list[int] | None = None
-    if from_addr:
-        lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == from_addr))
-        lead = lead_res.scalar_one_or_none()
+    chain_hit = await _lead_campaign_from_chain(db, parsed.get("in_reply_to"), parsed.get("references"))
+    if chain_hit is not None:
+        lead = (await db.execute(select(Lead).where(Lead.id == chain_hit[0]))).scalar_one_or_none()
+        if lead is not None:
+            campaign_ids_from_thread_only = [chain_hit[1]]
+    if lead is None:
+        lead = await _lead_by_sender(db, from_addr, inbox_id=inbox.id, inbox_email=inbox.email, thread_id=thread_key)
     if lead is None:
         pair = await _single_lead_campaign_pair_for_thread(db, thread_key)
         if pair is not None:
@@ -1825,7 +1876,7 @@ async def _process_smtp_inbound_message(
         # (e.g. a manually-received message to a known contact).
         for to_addr in (parsed.get("to") or []):
             to_lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == (to_addr or "").lower()))
-            if to_lead_res.scalar_one_or_none() is not None:
+            if to_lead_res.scalars().first() is not None:
                 thread_res = await db.execute(
                     select(SmtpThread).where(
                         SmtpThread.inbox_id == inbox.id,
@@ -3830,21 +3881,19 @@ async def _detect_o365_lead_replies(
         if not conv_id:
             continue
 
-        lead_res = await db.execute(
-            select(Lead).where(func.lower(Lead.email) == from_addr)
-        )
-        lead = lead_res.scalar_one_or_none()
+        lead = None
         campaign_ids_from_thread_only: list[int] | None = None
+        pair = await _single_lead_campaign_pair_for_thread(db, conv_id)
+        if pair is not None:
+            lead = (await db.execute(select(Lead).where(Lead.id == pair[0]))).scalar_one_or_none()
+            if lead is not None:
+                campaign_ids_from_thread_only = [pair[1]]
         if lead is None:
-            pair = await _single_lead_campaign_pair_for_thread(db, conv_id)
-            if pair is None:
-                continue
-            lid, cid = pair
-            lead_res_fb = await db.execute(select(Lead).where(Lead.id == lid))
-            lead = lead_res_fb.scalar_one_or_none()
-            if lead is None:
-                continue
-            campaign_ids_from_thread_only = [cid]
+            lead = await _lead_by_sender(
+                db, from_addr, inbox_id=inbox.id, inbox_email=inbox_email, thread_id=conv_id,
+            )
+        if lead is None:
+            continue
 
         # Always mark the thread as a lead thread when this lead sent us a message,
         # regardless of whether they're in an active campaign (matches Gmail behaviour).
@@ -4057,7 +4106,7 @@ async def _detect_o365_sent_to_lead(
             lead_res = await db.execute(
                 select(Lead).where(func.lower(Lead.email) == to_addr)
             )
-            lead = lead_res.scalar_one_or_none()
+            lead = lead_res.scalars().first()
             if not lead:
                 continue
 
