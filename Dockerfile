@@ -1,9 +1,10 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-# linux/amd64 only: the committed lockfile is resolved for this platform, which
-# sidesteps npm #4828 (optional native deps missing in cross-platform builds).
-FROM --platform=linux/amd64 node:22.20.0-slim AS frontend-builder
+# The frontend stage runs on the build host's platform, not the target's: the
+# built assets are platform-independent, and running npm ci under QEMU for
+# arm64 hits npm #4828 (optional native deps missing in cross-platform builds).
+FROM --platform=$BUILDPLATFORM node:22.20.0-slim AS frontend-builder
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/package-lock.json ./
@@ -15,7 +16,7 @@ RUN npm run build
 
 
 # 2. production Python image
-FROM --platform=linux/amd64 python:3.12.12-slim-bookworm AS backend
+FROM python:3.12.12-slim-bookworm AS backend
 WORKDIR /app
 
 # pg_dump / pg_restore for backup & restore (see app/backup_pg.py)
@@ -56,6 +57,7 @@ ENV QUICKLY_MODE=production
 # and host-Caddy stacks set QUICKLY_PREBUILT_IMAGE=0 (or QUICKLY_TRACKING_CNAME_UI=1).
 ENV QUICKLY_PREBUILT_IMAGE=1
 
+# assumes the default --port 8000 from CMD below
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
