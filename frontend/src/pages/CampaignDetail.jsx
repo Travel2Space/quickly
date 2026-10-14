@@ -486,6 +486,14 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
 
   useEffect(() => { loadVerificationSummary(); }, [loadVerificationSummary]);
 
+  // Pre-launch check: leads lacking template variables have their emails held.
+  const [missingVars, setMissingVars] = useState(null);
+  useEffect(() => {
+    api.get(`/campaigns/${campaignId}/missing-vars`)
+      .then(setMissingVars)
+      .catch(e => console.warn('Could not load the missing-variables report', e));
+  }, [campaignId, leads]);
+
   useEffect(() => {
     api.get('/settings/email-verification').then(d => {
       const enabled = !!d.enabled;
@@ -911,6 +919,14 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           </form>
         )}
       </div>
+
+      {missingVars?.leads_missing > 0 && (
+        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-sm text-yellow-800">
+          {missingVars.leads_missing} lead(s) are missing template variables:{' '}
+          {Object.entries(missingVars.variables).map(([k, n]) => `${k} (${n})`).join(', ')}.
+          {' '}Their emails are held until the data is filled in.
+        </div>
+      )}
 
       {/* Filter bar */}
       <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
@@ -1855,18 +1871,23 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     if (!form.inbox_ids.length)     { setMsg({type:'error',text:'Select at least one inbox'});  return; }
     setSaving(true);
     try {
-      await api.patch(`/campaigns/${campaignId}`, form);
+      const saved = await api.patch(`/campaigns/${campaignId}`, form);
+      // Resuming a campaign returns the pre-launch missing-variables report.
+      const mv = saved?.missing_vars;
+      const mvNote = mv?.leads_missing > 0
+        ? ` · Heads up: ${mv.leads_missing} lead(s) are missing template variables (${Object.entries(mv.variables).map(([k, n]) => `${k} (${n})`).join(', ')}); their emails are held until the data is filled in`
+        : '';
       // If the timezone was changed, trigger a queue recalculation automatically.
       const tzChanged = form.timezone !== (campaign.timezone ?? '');
       if (tzChanged) {
         try {
           await api.post(`/campaigns/${campaignId}/recalculate-queue`);
-          setMsg({ type: 'success', text: 'Settings saved · Queue recalculated for new timezone' });
+          setMsg({ type: 'success', text: 'Settings saved · Queue recalculated for new timezone' + mvNote });
         } catch (_) {
-          setMsg({ type: 'success', text: 'Settings saved (queue recalculation failed — run it manually if needed)' });
+          setMsg({ type: 'success', text: 'Settings saved (queue recalculation failed — run it manually if needed)' + mvNote });
         }
       } else {
-        setMsg({ type: 'success', text: 'Settings saved' });
+        setMsg({ type: 'success', text: 'Settings saved' + mvNote });
       }
       onSave();
     } catch (e) {

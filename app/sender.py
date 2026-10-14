@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import email.policy
 from datetime import datetime, timedelta
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import make_msgid, parseaddr
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -108,12 +108,47 @@ def _log_gmail_call(
         log.warning("Could not write to gmail log file at %s", _GMAIL_LOG_PATH)
 
 
-def render_body(body: str, lead_data: Dict[str, Any]) -> str:
-    """Replace {{field}} with lead_data[field]. Supports {{name}}, {{email}}, {{company}}, etc."""
+_TEMPLATE_VAR_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+# Built-ins always exist on a lead (possibly empty): never "missing" in strict mode.
+_BUILTIN_TEMPLATE_VARS = frozenset({"name", "email"})
+
+
+class MissingTemplateVars(ValueError):
+    """Strict render found variables with no value; carries their names, sorted."""
+
+    def __init__(self, names):
+        self.names = sorted(set(names))
+        super().__init__("missing template variables: " + ", ".join(self.names))
+
+
+def render_body(body: str, lead_data: Dict[str, Any], strict: bool = False) -> str:
+    """Replace {{field}} with lead_data[field].
+
+    Lenient (default): unknown fields stay as-is. Strict: an unknown, None or blank field
+    (except the built-ins name/email) raises MissingTemplateVars listing every such field.
+    """
+    missing: list[str] = []
+
     def repl(match: re.Match) -> str:
         key = match.group(1).strip()
+        if strict and key not in _BUILTIN_TEMPLATE_VARS:
+            val = lead_data.get(key)
+            if val is None or not str(val).strip():
+                missing.append(key)
+                return ""
         return str(lead_data.get(key, match.group(0)))
-    return re.sub(r"\{\{\s*(\w+)\s*\}\}", repl, body)
+
+    out = _TEMPLATE_VAR_RE.sub(repl, body or "")
+    if missing:
+        raise MissingTemplateVars(missing)
+    return out
+
+
+def _msgid_domain(from_email: str | None) -> str | None:
+    """Our Message-IDs use the sender's domain, never the container hostname."""
+    _, addr = parseaddr(from_email or "")
+    local, at, domain = addr.strip().rpartition("@")
+    return domain.lower() if at and local and domain else None
 
 
 def get_lead_data(lead) -> Dict[str, Any]:
@@ -480,7 +515,7 @@ def _send_via_gmail(
         return None
 
     # compose the MIME message using Python stdlib (no external deps)
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     msg = _build_email_message(
         to_email=to_email,
         subject=subject,
@@ -684,7 +719,7 @@ def send_email(
         provider = "gmail"
 
     if settings.test_mode:
-        fake_id = make_msgid()
+        fake_id = make_msgid(domain=_msgid_domain(from_email))
         log.info(
             "TEST MODE: simulated send to=%s subject=%r from=%s — no email actually sent",
             to_email, subject, from_email,
@@ -852,7 +887,7 @@ def _send_via_office365(
     # Build the MIME message once — same path as Gmail, so List-Unsubscribe,
     # List-Unsubscribe-Post, In-Reply-To, References etc. are all set as
     # normal RFC 2822 headers without any provider-specific workaround.
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     mime_msg = _build_email_message(
         to_email=to_email,
         subject=subject,
@@ -1099,7 +1134,7 @@ def _send_via_smtp(
     import smtplib
     import socket
 
-    message_id = make_msgid()
+    message_id = make_msgid(domain=_msgid_domain(from_email))
     mime_msg = _build_email_message(
         to_email=to_email,
         subject=subject,

@@ -403,12 +403,18 @@ Add a new sequence step. Triggers queue recalculation.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `position` | int | Yes | Step number (1-based) |
+| `position` | int | Yes | Step number (**0-based**): the first step is `0`; allowed range is `0..N` where N is the current number of steps; a value below N inserts and shifts later steps, allowed only while no leads are enrolled |
 | `subject` | string | No | Email subject (empty = reply in thread) |
 | `body` | string | Yes | Email body (HTML or plain text) |
 | `wait_days_after_previous` | int | Yes | Days to wait after previous step |
 | `is_html` | bool | No | Whether body is HTML |
 | `preview_text` | string | No | Preheader / preview text (shown in inbox fragments) |
+
+Example body (first step):
+
+```json
+{"position": 0, "subject": "Hello {{name}}", "body": "Hi!", "wait_days_after_previous": 0}
+```
 
 ### `PATCH /api/campaigns/{id}/sequences/{seq_id}`
 

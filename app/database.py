@@ -210,8 +210,12 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_diagnostic_json TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_error TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS imap_backfill_days INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS unibox_store_unmatched BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS unibox_ignore_senders TEXT NOT NULL DEFAULT ''",
         # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE queue_slot ADD COLUMN IF NOT EXISTS blocked_missing_vars JSON NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)
