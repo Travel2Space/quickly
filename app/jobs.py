@@ -547,10 +547,9 @@ async def run_send_job():
                         )
                         # The chain is the thread being answered: a step with its own subject opened
                         # a new thread, and earlier threads must not leak into References.
-                        chain = [
-                            e for e in all_logs[: all_logs.index(anchor) + 1]
-                            if e is anchor or (anchor.thread_id and e.thread_id == anchor.thread_id)
-                        ]
+                        upto_anchor = all_logs[: all_logs.index(anchor) + 1]
+                        # Without a thread id there is no way to tell threads apart: keep the old behaviour.
+                        chain = [e for e in upto_anchor if e is anchor or e.thread_id == anchor.thread_id] if anchor.thread_id else upto_anchor
                         reply_to_msg_id = anchor.message_id
                         references_chain = " ".join(
                             (mid if mid.startswith("<") else f"<{mid}>")
@@ -1474,10 +1473,9 @@ async def send_slot_job(slot_id: int) -> None:
                 )
                 # The chain is the thread being answered: a step with its own subject opened
                 # a new thread, and earlier threads must not leak into References.
-                chain = [
-                    e for e in all_logs[: all_logs.index(anchor) + 1]
-                    if e is anchor or (anchor.thread_id and e.thread_id == anchor.thread_id)
-                ]
+                upto_anchor = all_logs[: all_logs.index(anchor) + 1]
+                # Without a thread id there is no way to tell threads apart: keep the old behaviour.
+                chain = [e for e in upto_anchor if e is anchor or e.thread_id == anchor.thread_id] if anchor.thread_id else upto_anchor
                 reply_to_msg_id = anchor.message_id
                 references_chain = " ".join(
                     (mid if mid.startswith("<") else f"<{mid}>")

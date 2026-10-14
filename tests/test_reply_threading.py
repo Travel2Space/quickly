@@ -39,3 +39,18 @@ async def test_w2_replies_to_w1(session, monkeypatch):
     sent, _ = wire(monkeypatch, session)
     await jobs_mod.send_slot_job(slot.id)
     assert (sent[0]["subject"], sent[0]["reply_to_msg_id"], sent[0]["references"]) == ("Re: A", "<w1@x>", "<w1@x>")
+
+
+@pytest.mark.asyncio
+async def test_chain_without_thread_ids_keeps_every_earlier_message(session, monkeypatch):
+    inbox = await make_smtp_inbox(session)
+    campaign = await make_open_campaign(session, inbox)
+    for pos, subj in enumerate(["A", "B", ""]):
+        await make_sequence(session, campaign.id, position=pos, subject=subj, body=f"W{pos + 1}")
+    lead, _, slot = await enroll_due(session, campaign, inbox, sequence_index=2)
+    await add_sent_log(session, lead, campaign, inbox, index=0, subject="A", message_id="<w1@x>", thread_id=None, minutes_ago=20)
+    await add_sent_log(session, lead, campaign, inbox, index=1, subject="B", message_id="<w2@x>", thread_id=None, minutes_ago=10)
+    sent, _ = wire(monkeypatch, session)
+    await jobs_mod.send_slot_job(slot.id)
+    assert sent[0]["subject"] == "Re: B"
+    assert sent[0]["references"] == "<w1@x> <w2@x>"
