@@ -80,6 +80,11 @@ export default function LeadDetail() {
             verify: {lead.email_verification_status}
           </span>
         )}
+        {lead.suppressed_at && (
+          <span className="bg-red-100 text-red-800 rounded-full px-2 py-0.5 text-xs">
+            Suppressed: {new Date(lead.suppressed_at).toLocaleDateString()} — {lead.suppressed_reason}
+          </span>
+        )}
         {lead.provider && (
           <span className="bg-slate-100 text-slate-700 rounded-full px-2 py-0.5 text-xs">
             {lead.provider}

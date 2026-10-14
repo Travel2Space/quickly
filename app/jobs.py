@@ -45,6 +45,7 @@ from app.app_settings import get_google_oauth_credentials, get_office365_oauth_c
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
 from app.campaign_lead_status import campaign_lead_may_receive_sends
+from app.suppression import suppress_email
 
 log = logging.getLogger(__name__)
 
@@ -908,6 +909,7 @@ async def run_send_job():
                     if result.error_type in ("bounce", "invalid_recipient"):
                         prev_enr = getattr(cl, "enrollment_status", None) or "active"
                         cl.enrollment_status = "bounced"
+                        await suppress_email(session, lead.email, "bounce")
                         # Delete ALL remaining queue slots for this lead+campaign
                         from sqlalchemy import delete as sql_delete
                         await session.execute(
@@ -1745,6 +1747,7 @@ async def send_slot_job(slot_id: int) -> None:
             if result.error_type in ("bounce", "invalid_recipient"):
                 prev_enr = getattr(cl, "enrollment_status", None) or "active"
                 cl.enrollment_status = "bounced"
+                await suppress_email(session, lead.email, "bounce")
                 from sqlalchemy import delete as _sql_delete
                 await session.execute(
                     _sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)

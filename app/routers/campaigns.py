@@ -2087,6 +2087,7 @@ async def bulk_add_leads_to_campaign(
     results = []
     added = 0
     already_enrolled = 0
+    suppressed = 0
     errors = 0
     duplicate_leads: list[str] = []
     # Track new enrollments for bulk scheduling after provider detection
@@ -2124,6 +2125,11 @@ async def bulk_add_leads_to_campaign(
                 if changed:
                     await db.flush()
                     await clear_missing_var_blocks(db, lead_id=lead.id)
+
+            if lead.suppressed_at is not None:
+                results.append({"email": email, "status": "suppressed", "reason": lead.suppressed_reason})
+                suppressed += 1
+                continue
 
             # Check enrollment
             if skip_duplicates:
@@ -2262,6 +2268,7 @@ async def bulk_add_leads_to_campaign(
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "suppressed": suppressed,
         "duplicate_leads": duplicate_leads,
         "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
@@ -2784,6 +2791,7 @@ async def import_campaign_leads(
 
     added = 0
     already_enrolled = 0
+    suppressed = 0
     errors = 0
     duplicates_in_batch = 0
     duplicate_leads: list[str] = []
@@ -2855,6 +2863,11 @@ async def import_campaign_leads(
                 if changed:
                     await db.flush()
                     await clear_missing_var_blocks(db, lead_id=lead.id)
+
+            if lead.suppressed_at is not None:
+                results_list.append({"row": row_num, "email": email, "status": "suppressed", "reason": lead.suppressed_reason})
+                suppressed += 1
+                continue
 
             if skip_duplicates:
                 # Global check: skip if enrolled in any campaign
@@ -2974,10 +2987,11 @@ async def import_campaign_leads(
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "suppressed": suppressed,
         "duplicate_leads": duplicate_leads,
         "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
-        "total_rows": added + already_enrolled + duplicates_in_batch + errors,
+        "total_rows": added + already_enrolled + suppressed + duplicates_in_batch + errors,
         "verification_queued": verify_emails and bool(added_lead_ids_csv),
         "missing_vars": await missing_vars_report(db, campaign_id),
     }

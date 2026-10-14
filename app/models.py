@@ -147,6 +147,10 @@ class Lead(Base):
     # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
     provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)
+    # Global opt-out (Q-3): set = never mailed by any campaign. Keyed by address in practice:
+    # app.suppression stamps every lead row sharing the (lower-cased) email.
+    suppressed_at = Column(DateTime, nullable=True, default=None, index=True)
+    suppressed_reason = Column(String(64), nullable=True, default=None)
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
     replies = relationship("LeadReply", back_populates="lead")

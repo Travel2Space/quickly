@@ -16,6 +16,9 @@ from app.campaign_lead_status import LEAD_INTERESTS, normalize_enrollment_status
 from app.database import get_db
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.send_prep import clear_missing_var_blocks
+from app.suppression import suppress_email, unsuppress_email
+from app.auth import require_admin
+from pydantic import BaseModel
 from app.models import (
     Campaign,
     CampaignLead,
@@ -635,6 +638,27 @@ async def export_leads_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="leads_{suffix}.csv"'},
     )
+
+
+class SuppressRequest(BaseModel):
+    email: str
+    reason: str = "manual"
+
+
+@router.post("/suppress")
+async def suppress_lead(data: SuppressRequest, db: AsyncSession = Depends(get_db)):
+    """Suppress an address in every campaign (idempotent)."""
+    newly = await suppress_email(db, data.email, data.reason)
+    await db.commit()
+    return {"email": data.email.strip().lower(), "suppressed": True, "newly_suppressed": newly}
+
+
+@router.post("/unsuppress")
+async def unsuppress_lead(data: SuppressRequest, db: AsyncSession = Depends(get_db), user=Depends(require_admin)):
+    """Admin-only undo for a suppression made in error. Re-enqueue happens on the next recalculation."""
+    count = await unsuppress_email(db, data.email)
+    await db.commit()
+    return {"email": data.email.strip().lower(), "suppressed": False, "leads": count}
 
 
 @router.post("/bulk-delete")

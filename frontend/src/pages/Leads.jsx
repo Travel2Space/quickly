@@ -532,6 +532,14 @@ export default function Leads() {
                           verify: {l.email_verification_status}
                         </span>
                       )}
+                      {l.suppressed_at && (
+                        <span
+                          className="rounded-full px-2 py-0.5 text-xs font-medium bg-red-100 text-red-800"
+                          title={l.suppressed_reason}
+                        >
+                          Suppressed
+                        </span>
+                      )}
                       {(l.campaigns || []).slice(0, 3).map((c) => (
                         <span
                           key={c.campaign_id}
