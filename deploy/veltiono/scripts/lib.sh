@@ -35,9 +35,11 @@ tg_send() {
     log "telegram not configured: $1"
     return 0
   fi
-  curl -fsS -m 10 -X POST "$api/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${TELEGRAM_OPS_CHAT_ID}" \
-    --data-urlencode "text=[quickly] $1" >/dev/null || log "telegram send failed"
+  # The token reaches curl as a config on stdin, so it never appears in argv (ps, /proc).
+  printf 'url = "%s/bot%s/sendMessage"\n' "$api" "$TELEGRAM_BOT_TOKEN" \
+    | curl -fsS -m 10 -K - \
+        --data-urlencode "chat_id=${TELEGRAM_OPS_CHAT_ID}" \
+        --data-urlencode "text=[quickly] $1" >/dev/null || log "telegram send failed"
 }
 
 # COMPOSE_FILE in .env picks the proxy overlay.
