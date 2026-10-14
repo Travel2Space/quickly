@@ -77,7 +77,7 @@ run '. scripts/lib.sh; load_env; aws_r2 s3 mb "s3://$R2_BUCKET" >/dev/null
   echo x | aws_r2 s3 cp - "s3://$R2_BUCKET/quickly/2000-01-01T000000Z/manifest.json" >/dev/null   # past retention'
 run 'bash scripts/backup.sh' >/dev/null || die "D2 backup.sh"
 run '. scripts/lib.sh; load_env; aws_r2 s3 ls --recursive "s3://$R2_BUCKET/quickly/"' | grep 'manifest.json' >/dev/null || die "D2 manifest"
-run '. scripts/lib.sh; load_env; aws_r2 s3 ls "s3://$R2_BUCKET/quickly/" </dev/null' | grep '2000-01-01T000000Z' >/dev/null && die "D2 old folder not pruned"
+run '. scripts/lib.sh; load_env; aws_r2 s3 ls --recursive "s3://$R2_BUCKET/quickly/" </dev/null' | grep '2000-01-01T000000Z' >/dev/null && die "D2 old folder not pruned"
 F="$(run '. scripts/lib.sh; load_env; find_backup' | tr -d '\r')"
 case "$F" in 20[0-9][0-9]-*T*Z) [ "$F" != 2099-01-01T000000Z ] || die "D2 incomplete folder picked" ;; *) die "D2 bad folder name: $F" ;; esac
 [ "$(run 'cat state/last-backup-folder' | tr -d '\r')" = "$F" ] || die "D2 last-backup-folder"
