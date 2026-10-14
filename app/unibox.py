@@ -202,22 +202,28 @@ async def _lead_campaign_from_chain(
     return next((found[m] for m in ids if m in found), None)
 
 
-async def _lead_by_sender(
-    db: AsyncSession, from_addr: str, *, inbox_id: int, inbox_email: str, thread_id: str
-) -> Lead | None:
-    """Fallback attribution by From. Several leads share the address -> attach none, notify."""
+async def _lead_by_sender(db: AsyncSession, from_addr: str) -> tuple[Lead | None, int]:
+    """Fallback attribution by From -> ``(lead, matches)``.
+
+    Several leads share the address -> ``(None, n)``; the caller notifies via
+    ``_notify_ambiguous_sender`` only if nothing else attaches the message.
+    """
     if not from_addr:
-        return None
+        return None, 0
     leads = (await db.execute(select(Lead).where(func.lower(Lead.email) == from_addr))).scalars().all()
     if len(leads) == 1:
-        return leads[0]
-    if len(leads) > 1:
-        from app.webhooks import fire_webhook_event as _fwe
-        await _fwe(db, "reply.ambiguous_sender", {
-            "inbox_id": inbox_id, "inbox_email": inbox_email, "from_email": from_addr,
-            "lead_count": len(leads), "thread_id": thread_id,
-        })
-    return None
+        return leads[0], 1
+    return None, len(leads)
+
+
+async def _notify_ambiguous_sender(
+    db: AsyncSession, from_addr: str, lead_count: int, *, inbox_id: int, inbox_email: str, thread_id: str
+) -> None:
+    from app.webhooks import fire_webhook_event as _fwe
+    await _fwe(db, "reply.ambiguous_sender", {
+        "inbox_id": inbox_id, "inbox_email": inbox_email, "from_email": from_addr,
+        "lead_count": lead_count, "thread_id": thread_id,
+    })
 
 
 def _extract_email_only(header_value: str) -> str:
@@ -965,7 +971,10 @@ async def _upsert_message_from_gmail(
         lead: Lead | None = None
         campaign_ids_from_thread_only: list[int] | None = None
 
-        chain_hit = await _lead_campaign_from_chain(
+        # A bounce quotes our In-Reply-To but is not a reply from the lead.
+        is_bounce_sender = bool(_MAILER_DAEMON_RE.match(from_email_addr or ""))
+        ambiguous_n = 0
+        chain_hit = None if is_bounce_sender else await _lead_campaign_from_chain(
             db,
             _header_value(headers_json, "In-Reply-To").strip() or None,
             _header_value(headers_json, "References").split(),
@@ -974,12 +983,10 @@ async def _upsert_message_from_gmail(
             lead = (await db.execute(select(Lead).where(Lead.id == chain_hit[0]))).scalar_one_or_none()
             if lead is not None:
                 campaign_ids_from_thread_only = [chain_hit[1]]
-        if lead is None and from_email_addr:
-            lead = await _lead_by_sender(
-                db, from_email_addr, inbox_id=inbox_id, inbox_email="", thread_id=thread_id,
-            )
+        if lead is None and from_email_addr and not is_bounce_sender:
+            lead, ambiguous_n = await _lead_by_sender(db, from_email_addr)
 
-        if lead is None:
+        if lead is None and not is_bounce_sender:
             pair = await _single_lead_campaign_pair_for_thread(db, thread_id)
             if pair is not None:
                 lid, cid = pair
@@ -987,6 +994,10 @@ async def _upsert_message_from_gmail(
                 lead = lead_res_fb.scalar_one_or_none()
                 if lead is not None:
                     campaign_ids_from_thread_only = [cid]
+        if lead is None and ambiguous_n > 1:
+            await _notify_ambiguous_sender(
+                db, from_email_addr, ambiguous_n, inbox_id=inbox_id, inbox_email="", thread_id=thread_id,
+            )
 
         if lead is not None:
             reply_from_addr = from_email_addr or _extract_email_only(
@@ -1616,6 +1627,7 @@ def _fetch_smtp_new_messages(
         typ, data = client.status("INBOX", "(UIDVALIDITY UIDNEXT)")
         current_validity: int | None = uidvalidity
         uidnext = 0
+        status_ok = False
         try:
             status_raw = (data[0] or b"").decode("utf-8", errors="ignore") if data else ""
             import re as _re
@@ -1626,8 +1638,12 @@ def _fetch_smtp_new_messages(
             mn = _re.search(r"UIDNEXT\s+(\d+)", status_raw)
             if mn:
                 uidnext = int(mn.group(1))
+            status_ok = bool(m and mn)
         except Exception:
-            pass
+            status_ok = False
+        if not status_ok:
+            log.warning("SMTP sync: cannot parse IMAP STATUS (UIDVALIDITY/UIDNEXT); skipping this round")
+            return uidvalidity, [], None
         baseline: int | None = None
         if current_validity != uidvalidity:
             # First sync or recreated mailbox: start from "now", not from UID 1.
@@ -1657,11 +1673,17 @@ def _fetch_smtp_new_messages(
         cap = max(1, cap)
         if len(uids) > cap:
             deferred = len(uids) - cap
-            log.warning(
-                "SMTP sync: %d new UIDs beyond fetch cap %d — deferring the oldest %d "
-                "(next sync continues); watch for chronic backlog",
-                deferred, cap, deferred,
-            )
+            if baseline is not None:
+                log.warning(
+                    "SMTP sync: first-sync backfill has %d messages beyond fetch cap %d — "
+                    "the oldest %d are NOT imported", len(uids), cap, deferred,
+                )
+            else:
+                log.warning(
+                    "SMTP sync: %d new UIDs beyond fetch cap %d — deferring the oldest %d "
+                    "(next sync continues); watch for chronic backlog",
+                    deferred, cap, deferred,
+                )
             uids = uids[-cap:]
 
         out: list[tuple[int, bytes]] = []
@@ -1808,14 +1830,19 @@ async def _process_smtp_inbound_message(
     # ---------- Lead-reply detection ----------
     lead: Lead | None = None
     campaign_ids_from_thread_only: list[int] | None = None
-    chain_hit = await _lead_campaign_from_chain(db, parsed.get("in_reply_to"), parsed.get("references"))
+    # A mailer-daemon message that is not an NDR still is not a reply from a lead.
+    is_daemon = bool(_MAILER_DAEMON_RE.match(from_addr))
+    chain_hit = None if is_daemon else await _lead_campaign_from_chain(
+        db, parsed.get("in_reply_to"), parsed.get("references")
+    )
     if chain_hit is not None:
         lead = (await db.execute(select(Lead).where(Lead.id == chain_hit[0]))).scalar_one_or_none()
         if lead is not None:
             campaign_ids_from_thread_only = [chain_hit[1]]
-    if lead is None:
-        lead = await _lead_by_sender(db, from_addr, inbox_id=inbox.id, inbox_email=inbox.email, thread_id=thread_key)
-    if lead is None:
+    ambiguous_n = 0
+    if lead is None and not is_daemon:
+        lead, ambiguous_n = await _lead_by_sender(db, from_addr)
+    if lead is None and not is_daemon:
         pair = await _single_lead_campaign_pair_for_thread(db, thread_key)
         if pair is not None:
             lid, cid = pair
@@ -1823,6 +1850,10 @@ async def _process_smtp_inbound_message(
             lead = lead_res_fb.scalar_one_or_none()
             if lead is not None:
                 campaign_ids_from_thread_only = [cid]
+    if lead is None and ambiguous_n > 1:
+        await _notify_ambiguous_sender(
+            db, from_addr, ambiguous_n, inbox_id=inbox.id, inbox_email=inbox.email, thread_id=thread_key,
+        )
 
     if lead is not None:
         thread_res = await db.execute(
@@ -2017,8 +2048,6 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
         if (parsed.get("from") or "").lower() == own_addr:
             continue
         sender = (parsed.get("from") or "").lower()
-        if _sender_ignored(sender, acct.unibox_ignore_senders):
-            continue
         message_pk = f"{new_validity}:{uid}" if new_validity else f"uid:{uid}"
 
         # Resolve the thread: prefer a known sent message referenced by this
@@ -2050,12 +2079,17 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
                 if echo_hit:
                     thread_key = echo_hit
 
-        if not acct.unibox_store_unmatched and not (
-            hit or echo_hit or _MAILER_DAEMON_RE.match(sender)
-            or await _lead_campaign_from_chain(db, parsed.get("in_reply_to"), parsed.get("references"))
-            or (await db.execute(select(Lead.id).where(func.lower(Lead.email) == sender).limit(1))).first()
-        ):
-            continue
+        ignored = _sender_ignored(sender, acct.unibox_ignore_senders)
+        if ignored or not acct.unibox_store_unmatched:
+            known = bool(
+                hit or echo_hit or _MAILER_DAEMON_RE.match(sender)
+                or await _lead_campaign_from_chain(db, parsed.get("in_reply_to"), parsed.get("references"))
+                or (await db.execute(select(Lead.id).where(func.lower(Lead.email) == sender).limit(1))).first()
+            )
+            if not known:
+                continue
+            if ignored:
+                log.warning("ignore-list entry matched a lead/our thread; kept: %s", sender)
 
         _row, _created, _touched = await _process_smtp_inbound_message(
             db, inbox=inbox, parsed=parsed, message_pk=message_pk, thread_key=thread_key
@@ -3861,9 +3895,12 @@ async def _sync_inbox_office365(
         return folder_messages
 
     # ── Sync Inbox ────────────────────────────────────────────────────────
+    created_msg_ids: set[str] = set()
     inbox_messages = await _sync_folder("Inbox", "delta_link")
     for idx, msg in enumerate(inbox_messages, start=1):
         row, _created = await _upsert_o365_message(db, inbox.id, msg)
+        if _created:
+            created_msg_ids.add(str(msg.get("id", "")))
         touched_threads.add((inbox.id, row.conversation_id))
         if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
             state.last_sync_at = time_provider.utcnow()
@@ -3890,6 +3927,8 @@ async def _sync_inbox_office365(
     junk_messages = await _sync_folder("JunkEmail", "junk_delta_link")
     for idx, msg in enumerate(junk_messages, start=1):
         row, _created = await _upsert_o365_message(db, inbox.id, msg)
+        if _created:
+            created_msg_ids.add(str(msg.get("id", "")))
         touched_threads.add((inbox.id, row.conversation_id))
         if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
             state.last_sync_at = time_provider.utcnow()
@@ -3905,7 +3944,9 @@ async def _sync_inbox_office365(
 
     # Detect lead replies (inbound) and mark sent-to-lead threads (outbound)
     if all_messages:
-        await _detect_o365_lead_replies(db, inbox, inbox_messages + junk_messages)
+        await _detect_o365_lead_replies(
+            db, inbox, inbox_messages + junk_messages, created_ids=created_msg_ids,
+        )
         await _detect_o365_sent_to_lead(db, inbox, sent_messages)
 
     log.info(
@@ -3921,6 +3962,7 @@ async def _detect_o365_lead_replies(
     db: AsyncSession,
     inbox: Inbox,
     messages: list[dict[str, Any]],
+    created_ids: set[str] | None = None,
 ) -> None:
     """Detect lead replies among newly synced Office 365 messages (Inbox + JunkEmail).
 
@@ -3949,9 +3991,14 @@ async def _detect_o365_lead_replies(
             if lead is not None:
                 campaign_ids_from_thread_only = [pair[1]]
         if lead is None:
-            lead = await _lead_by_sender(
-                db, from_addr, inbox_id=inbox.id, inbox_email=inbox_email, thread_id=conv_id,
-            )
+            lead, ambiguous_n = await _lead_by_sender(db, from_addr)
+            if (
+                lead is None and ambiguous_n > 1
+                and (created_ids is None or str(msg.get("id", "")) in created_ids)
+            ):
+                await _notify_ambiguous_sender(
+                    db, from_addr, ambiguous_n, inbox_id=inbox.id, inbox_email=inbox_email, thread_id=conv_id,
+                )
         if lead is None:
             continue
 

@@ -117,6 +117,9 @@ async def test_lead_reply_kept_when_unmatched_mail_is_dropped(session, monkeypat
     session.add(SmtpSyncState(inbox_id=inbox.id, uidvalidity=7, last_uid=10))
     campaign = await make_campaign(session)
     lead = await make_lead(session, email="eng@example.gr")
+    from tests.conftest import make_campaign_lead, make_queue_slot
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_queue_slot(session, cl.id, inbox.id, sequence_index=1)
     session.add(EmailLog(lead_id=lead.id, campaign_id=campaign.id, inbox_id=inbox.id, sequence_index=0,
                          subject="Hi", message_id="<w1@veltiono.eu>", thread_id="<w1@veltiono.eu>",
                          sent_at=datetime.utcnow()))
@@ -125,6 +128,19 @@ async def test_lead_reply_kept_when_unmatched_mail_is_dropped(session, monkeypat
     _use(monkeypatch, FakeImap(msgs, uidnext=13))
     await unibox._sync_inbox_smtp(session, inbox)
     assert await _stored(session) == 1  # the reply quoting our email, from any address
+    from app.models import LeadReply, QueueSlot
+    assert (await session.execute(select(func.count()).select_from(LeadReply).where(LeadReply.lead_id == lead.id))).scalar() == 1
+    assert (await session.execute(select(func.count()).select_from(QueueSlot))).scalar() == 0
+
+
+@pytest.mark.asyncio
+async def test_ndr_survives_unstored_unmatched(session, monkeypatch):
+    inbox = await _inbox(session, unibox_store_unmatched=False)
+    session.add(SmtpSyncState(inbox_id=inbox.id, uidvalidity=7, last_uid=10))
+    await session.flush()
+    _use(monkeypatch, FakeImap({11: _raw("MAILER-DAEMON@mx.example.com", "<ndr@x>")}, uidnext=12))
+    await unibox._sync_inbox_smtp(session, inbox)
+    assert await _stored(session) == 1
 
 
 @pytest.mark.asyncio
@@ -136,3 +152,52 @@ async def test_recreated_mailbox_rebaselines_instead_of_reimporting(session, mon
     await unibox._sync_inbox_smtp(session, inbox)
     state = (await session.execute(select(SmtpSyncState))).scalar_one()
     assert (state.uidvalidity, state.last_uid) == (7, 299) and await _stored(session) == 0
+
+
+class NoUidNextImap(FakeImap):
+    def status(self, box, what):
+        return "OK", [f"INBOX (UIDVALIDITY {self.validity})".encode()]
+
+
+@pytest.mark.asyncio
+async def test_unparseable_status_changes_nothing(session, monkeypatch):
+    inbox = await _inbox(session)
+    fake = NoUidNextImap({1: _raw("h@x.com", "<a@x>")}, uidnext=2)
+    _use(monkeypatch, fake)
+    await unibox._sync_inbox_smtp(session, inbox)
+    state = (await session.execute(select(SmtpSyncState))).scalar_one()
+    assert state.uidvalidity is None and (state.last_uid or 0) == 0
+    assert fake.searches == [] and await _stored(session) == 0
+
+
+@pytest.mark.asyncio
+async def test_ignored_domain_still_stores_reply_quoting_our_email(session, monkeypatch):
+    from datetime import datetime
+    from app.models import EmailLog
+    from tests.conftest import make_campaign, make_lead
+
+    inbox = await _inbox(session, unibox_ignore_senders="example.gr")
+    session.add(SmtpSyncState(inbox_id=inbox.id, uidvalidity=7, last_uid=10))
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, email="eng@example.gr")
+    session.add(EmailLog(lead_id=lead.id, campaign_id=campaign.id, inbox_id=inbox.id, sequence_index=0,
+                         subject="Hi", message_id="<w1@veltiono.eu>", thread_id="<w1@veltiono.eu>",
+                         sent_at=datetime.utcnow()))
+    await session.flush()
+    _use(monkeypatch, FakeImap({11: _raw("eng@example.gr", "<r@x>", irt="<w1@veltiono.eu>")}, uidnext=12))
+    await unibox._sync_inbox_smtp(session, inbox)
+    assert await _stored(session) == 1
+
+
+@pytest.mark.parametrize("addr,rules,expected", [
+    ("a@x.com", "a@x.com", True),
+    ("A@X.com", "a@x.com", True),
+    ("a@mailreach.co", "@mailreach.co", True),
+    ("a@mailreach.co", "mailreach.co", True),
+    ("a@eu.mailreach.co", "mailreach.co", True),
+    ("a@notmailreach.co", "mailreach.co", False),
+    ("b@x.com", "a@x.com", False),
+    ("a@x.com", "", False),
+])
+def test_sender_ignored(addr, rules, expected):
+    assert unibox._sender_ignored(addr, rules) is expected

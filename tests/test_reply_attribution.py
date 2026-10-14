@@ -93,3 +93,26 @@ async def test_ambiguous_sender_is_not_attached(session, events):
     assert (await session.execute(select(func.count(LeadReply.id)))).scalar() == 0
     assert await _slots(session, cl1) == 1 and await _slots(session, cl2) == 1
     assert [e for e, _ in events] == ["reply.ambiguous_sender"]
+
+
+@pytest.mark.asyncio
+async def test_thread_fallback_beats_ambiguous_sender(session, events):
+    inbox, campaign = await _setup(session)
+    lead1, _ = await _enrolled(session, campaign, inbox, "dup@example.com", "<t1@veltiono.eu>")
+    lead2 = await make_lead(session, email="dup@example.com")
+    await session.flush()
+    await unibox._process_smtp_inbound_message(
+        session, inbox=inbox, parsed=_parsed("dup@example.com"), message_pk="7:9", thread_key="<t1@veltiono.eu>",
+    )
+    assert {r for (r,) in (await session.execute(select(LeadReply.lead_id))).all()} == {lead1.id}
+    assert [e for e, _ in events] != ["reply.ambiguous_sender"] and "reply.ambiguous_sender" not in [e for e, _ in events]
+
+
+@pytest.mark.asyncio
+async def test_mailer_daemon_with_our_in_reply_to_is_not_a_reply(session, events):
+    inbox, campaign = await _setup(session)
+    lead, cl = await _enrolled(session, campaign, inbox, "x@example.com", "<n1@veltiono.eu>")
+    p = _parsed("mailer-daemon@mail.example.com", "<n1@veltiono.eu>", ["<n1@veltiono.eu>"])
+    p["subject"] = "Re: hello"  # not a bounce-looking subject, so the NDR branch does not take it
+    await unibox._process_smtp_inbound_message(session, inbox=inbox, parsed=p, message_pk="7:10", thread_key="<n1@veltiono.eu>")
+    assert (await session.execute(select(func.count(LeadReply.id)))).scalar() == 0
