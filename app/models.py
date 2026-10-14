@@ -960,4 +960,5 @@ WEBHOOK_EVENT_TYPES = [
     "rate_limit",          # A rate limit violation was detected
     "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
+    "send.step_missing",   # A queued email points at a step the campaign no longer has
 ]

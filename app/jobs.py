@@ -40,6 +40,7 @@ from app.models import (
 )
 from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
+from app.send_prep import notify_once
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -1151,7 +1152,24 @@ async def send_slot_job(slot_id: int) -> None:
         )
         row = slot_res.first()
         if not row:
-            log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
+            orphan = (await session.execute(
+                select(QueueSlot.sequence_index, CampaignLead.campaign_id)
+                .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+                .where(QueueSlot.id == slot_id)
+            )).first()
+            if orphan is None:
+                log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
+                return
+            seq_idx, camp_id = orphan
+            log.error(
+                "send_slot_job: no step for index %d in campaign %d (slot %d) – not sent",
+                seq_idx, camp_id, slot_id,
+            )
+            if notify_once(("step_missing", camp_id, seq_idx)):
+                await fire_webhook_event(session, "send.step_missing", {
+                    "campaign_id": camp_id, "sequence_index": seq_idx, "slot_id": slot_id,
+                })
+                await session.commit()
             return
 
         slot, cl, campaign, lead, sequence, inbox = row

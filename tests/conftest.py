@@ -44,6 +44,16 @@ def quickly_test_logs_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_send_notifications():
+    """Notification de-dup is process-global; ids restart at 1 in every test schema."""
+    from app.send_prep import reset_for_tests
+
+    reset_for_tests()
+    yield
+    reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _reset_jobs_auth_cooldown():
     """The send-job auth-failure circuit breaker is process-global.
 
