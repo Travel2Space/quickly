@@ -3,7 +3,8 @@ import app.sender as sender_mod
 from tests.test_smtp import _FakeSMTP, _smtp_account
 
 
-@pytest.mark.parametrize("addr,dom", [("partners@Veltiono.EU", "veltiono.eu"), ("", None), ("nodomain", None), ("@x.gr", None)])
+@pytest.mark.parametrize("addr,dom", [("partners@Veltiono.EU", "veltiono.eu"), ("", None), ("nodomain", None), ("@x.gr", None),
+                                      ("Veltiono Partners <partners@Veltiono.EU>", "veltiono.eu")])
 def test_msgid_domain(addr, dom):
     assert sender_mod._msgid_domain(addr) == dom
 

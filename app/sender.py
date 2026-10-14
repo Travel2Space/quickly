@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import email.policy
 from datetime import datetime, timedelta
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import make_msgid, parseaddr
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -146,7 +146,8 @@ def render_body(body: str, lead_data: Dict[str, Any], strict: bool = False) -> s
 
 def _msgid_domain(from_email: str | None) -> str | None:
     """Our Message-IDs use the sender's domain, never the container hostname."""
-    local, at, domain = (from_email or "").strip().rpartition("@")
+    _, addr = parseaddr(from_email or "")
+    local, at, domain = addr.strip().rpartition("@")
     return domain.lower() if at and local and domain else None
 
 
