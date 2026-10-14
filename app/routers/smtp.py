@@ -56,9 +56,10 @@ class SmtpAccountUpsert(BaseModel):
     imap_username: str = Field(default="", max_length=255)
     imap_password: str = Field(default="", max_length=1024)
     imap_use_ssl: bool = True
-    imap_backfill_days: int = Field(default=0, ge=0, le=365)
-    unibox_store_unmatched: bool = True
-    unibox_ignore_senders: str = Field(default="", max_length=5000)
+    # None = not sent by the client: keep the stored value.
+    imap_backfill_days: int | None = Field(default=None, ge=0, le=365)
+    unibox_store_unmatched: bool | None = None
+    unibox_ignore_senders: str | None = Field(default=None, max_length=5000)
 
 
 class SmtpAccountResponse(BaseModel):
@@ -232,9 +233,12 @@ async def upsert_smtp_account(
     elif not acct.imap_host:
         acct.imap_password = ""
     acct.imap_use_ssl = bool(payload.get("imap_use_ssl", True))
-    acct.imap_backfill_days = max(0, int(payload.get("imap_backfill_days") or 0))
-    acct.unibox_store_unmatched = bool(payload.get("unibox_store_unmatched", True))
-    acct.unibox_ignore_senders = (payload.get("unibox_ignore_senders") or "").strip()
+    if payload.get("imap_backfill_days") is not None:
+        acct.imap_backfill_days = int(payload["imap_backfill_days"])
+    if payload.get("unibox_store_unmatched") is not None:
+        acct.unibox_store_unmatched = bool(payload["unibox_store_unmatched"])
+    if payload.get("unibox_ignore_senders") is not None:
+        acct.unibox_ignore_senders = payload["unibox_ignore_senders"].strip()
     acct.updated_at = utcnow()
     await db.flush()
     log.info("SMTP account saved: inbox_id=%s host=%s", inbox_id, acct.smtp_host)
