@@ -677,6 +677,9 @@ export default function Inboxes() {
     imap_username: '',
     imap_password: '',
     imap_use_ssl: true,
+    imap_backfill_days: 0,
+    unibox_store_unmatched: true,
+    unibox_ignore_senders: '',
   };
   const [smtpForm, setSmtpForm] = useState(initialSmtpForm);
   // SMTP credentials for the Edit panel (loaded on demand per inbox)
@@ -1038,13 +1041,17 @@ export default function Inboxes() {
           imap_username: d.imap_username || '',
           imap_password: '',
           imap_use_ssl: d.imap_use_ssl !== false,
+          imap_backfill_days: d.imap_backfill_days || 0,
+          unibox_store_unmatched: d.unibox_store_unmatched !== false,
+          unibox_ignore_senders: d.unibox_ignore_senders || '',
           _meta: d,
         }))
         .catch(() => setEditingSmtp({
           smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password: '',
           smtp_use_tls: true, smtp_use_ssl: false,
           imap_host: '', imap_port: 993, imap_username: '', imap_password: '',
-          imap_use_ssl: true, _meta: null,
+          imap_use_ssl: true, imap_backfill_days: 0, unibox_store_unmatched: true,
+          unibox_ignore_senders: '', _meta: null,
         }));
     }
     editOriginalDomain.current = inbox.tracking_domain || '';
@@ -1220,6 +1227,9 @@ export default function Inboxes() {
       || +s.imap_port !== +m.imap_port
       || (s.imap_username || '') !== (m.imap_username || '')
       || !!s.imap_use_ssl !== !!m.imap_use_ssl
+      || +(s.imap_backfill_days || 0) !== +(m.imap_backfill_days || 0)
+      || !!s.unibox_store_unmatched !== (m.unibox_store_unmatched !== false)
+      || (s.unibox_ignore_senders || '') !== (m.unibox_ignore_senders || '')
       || !!(s.smtp_password || s.imap_password)
     );
   })();
@@ -1747,6 +1757,19 @@ export default function Inboxes() {
                                     <label className="block text-xs font-medium text-gray-700">IMAP password {editingSmtp._meta?.has_imap_password && <span className="text-gray-400 font-normal">(saved — re-enter to change)</span>}</label>
                                     <input type="password" value={editingSmtp.imap_password} onChange={e => setEditingSmtp(prev => ({ ...prev, imap_password: e.target.value }))} autoComplete="new-password" placeholder={editingSmtp._meta?.has_imap_password ? '••••••••' : ''} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                                   </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-700">History to import on first sync (days)</label>
+                                    <input type="number" min="0" max="365" value={editingSmtp.imap_backfill_days ?? 0} onChange={e => setEditingSmtp(p => ({ ...p, imap_backfill_days: Number(e.target.value) }))} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                    <p className="text-xs text-gray-400 mt-1">0 = start from now; older mail in the mailbox is not imported.</p>
+                                  </div>
+                                  <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+                                    <input type="checkbox" checked={editingSmtp.unibox_store_unmatched ?? true} onChange={e => setEditingSmtp(p => ({ ...p, unibox_store_unmatched: e.target.checked }))} />
+                                    Store mail that is not a lead reply in Unibox
+                                  </label>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-700">Never store mail from (one address or domain per line)</label>
+                                    <textarea rows={3} value={editingSmtp.unibox_ignore_senders ?? ''} onChange={e => setEditingSmtp(p => ({ ...p, unibox_ignore_senders: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                  </div>
                                 </>
                               )}
                               {editingSmtp._meta?.last_tested_at && (
@@ -2243,6 +2266,19 @@ export default function Inboxes() {
                         <input type="checkbox" checked={!!smtpForm.imap_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, imap_use_ssl: e.target.checked }))} />
                         Use SSL (993)
                       </label>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">History to import on first sync (days)</label>
+                        <input type="number" min="0" max="365" value={smtpForm.imap_backfill_days ?? 0} onChange={e => setSmtpForm(p => ({ ...p, imap_backfill_days: Number(e.target.value) }))} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                        <p className="text-xs text-gray-400 mt-1">0 = start from now; older mail in the mailbox is not imported.</p>
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+                        <input type="checkbox" checked={smtpForm.unibox_store_unmatched ?? true} onChange={e => setSmtpForm(p => ({ ...p, unibox_store_unmatched: e.target.checked }))} />
+                        Store mail that is not a lead reply in Unibox
+                      </label>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Never store mail from (one address or domain per line)</label>
+                        <textarea rows={3} value={smtpForm.unibox_ignore_senders ?? ''} onChange={e => setSmtpForm(p => ({ ...p, unibox_ignore_senders: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      </div>
                     </>
                   )}
                   <p className="text-xs text-gray-400">Connection is tested automatically after the inbox is created.</p>

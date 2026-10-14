@@ -56,6 +56,10 @@ class SmtpAccountUpsert(BaseModel):
     imap_username: str = Field(default="", max_length=255)
     imap_password: str = Field(default="", max_length=1024)
     imap_use_ssl: bool = True
+    # None = not sent by the client: keep the stored value.
+    imap_backfill_days: int | None = Field(default=None, ge=0, le=365)
+    unibox_store_unmatched: bool | None = None
+    unibox_ignore_senders: str | None = Field(default=None, max_length=5000)
 
 
 class SmtpAccountResponse(BaseModel):
@@ -70,6 +74,9 @@ class SmtpAccountResponse(BaseModel):
     imap_port: int
     imap_username: str
     imap_use_ssl: bool
+    imap_backfill_days: int = 0
+    unibox_store_unmatched: bool = True
+    unibox_ignore_senders: str = ""
     has_smtp_password: bool = False
     has_imap_password: bool = False
     last_tested_at: str | None = None
@@ -97,6 +104,9 @@ def _to_response(acct: SmtpAccount) -> dict:
         "imap_port": acct.imap_port or 993,
         "imap_username": acct.imap_username or "",
         "imap_use_ssl": bool(acct.imap_use_ssl),
+        "imap_backfill_days": int(acct.imap_backfill_days or 0),
+        "unibox_store_unmatched": acct.unibox_store_unmatched is not False,
+        "unibox_ignore_senders": acct.unibox_ignore_senders or "",
         "has_smtp_password": bool(acct.smtp_password),
         "has_imap_password": bool(acct.imap_password),
         "last_tested_at": acct.last_tested_at.isoformat() if acct.last_tested_at else None,
@@ -223,6 +233,12 @@ async def upsert_smtp_account(
     elif not acct.imap_host:
         acct.imap_password = ""
     acct.imap_use_ssl = bool(payload.get("imap_use_ssl", True))
+    if payload.get("imap_backfill_days") is not None:
+        acct.imap_backfill_days = int(payload["imap_backfill_days"])
+    if payload.get("unibox_store_unmatched") is not None:
+        acct.unibox_store_unmatched = bool(payload["unibox_store_unmatched"])
+    if payload.get("unibox_ignore_senders") is not None:
+        acct.unibox_ignore_senders = payload["unibox_ignore_senders"].strip()
     acct.updated_at = utcnow()
     await db.flush()
     log.info("SMTP account saved: inbox_id=%s host=%s", inbox_id, acct.smtp_host)

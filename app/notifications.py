@@ -70,6 +70,13 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
         message = (
             f"An email to **{lead_email}** bounced and could not be delivered."
         )
+    elif event_type == "reply.ambiguous_sender":
+        frm = data.get("from_email", "unknown")
+        title = f"Reply from {frm} not attached to a lead"
+        message = (
+            f"**{data.get('lead_count')}** leads share **{frm}** and the reply does not quote one of "
+            f"our emails, so no sequence was stopped. Open the conversation in Unibox and stop the right lead by hand."
+        )
     elif event_type == "lead.replied":
         lead_email = data.get("lead_email", "a lead")
         lead_name = data.get("lead_name", "")

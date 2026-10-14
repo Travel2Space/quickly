@@ -323,6 +323,9 @@ async def test_e2e_smtp_imap_reply_and_bounce(session, monkeypatch):
         (2, ndr.as_bytes()),
     ])
     monkeypatch.setattr("app.smtp_utils._imap_connect", lambda account, timeout=30: fake_imap)
+    # Incremental sync: a first sync now starts from "now" (Q-9) and would skip UID 1-2.
+    session.add(SmtpSyncState(inbox_id=inbox.id, uidvalidity=4242, last_uid=0))
+    await session.flush()
 
     touched = await unibox_mod._sync_inbox_smtp(session, inbox, "e2e")
     assert (inbox.id, root_mid) in touched
