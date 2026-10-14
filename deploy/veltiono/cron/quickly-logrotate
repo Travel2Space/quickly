@@ -1,0 +1,7 @@
+/var/log/quickly-*.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+}
