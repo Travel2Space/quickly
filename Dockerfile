@@ -57,6 +57,7 @@ ENV QUICKLY_MODE=production
 # and host-Caddy stacks set QUICKLY_PREBUILT_IMAGE=0 (or QUICKLY_TRACKING_CNAME_UI=1).
 ENV QUICKLY_PREBUILT_IMAGE=1
 
+# assumes the default --port 8000 from CMD below
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status == 200 else 1)"
 
