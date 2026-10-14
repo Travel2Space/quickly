@@ -90,29 +90,99 @@ def template_var_names(*texts) -> set[str]:
     return names
 
 
+def _step_is_html(campaign, position: int, is_html, body: str | None) -> bool:
+    """Mirror of the sender's HTML decision, which decides whether the preheader is rendered."""
+    if getattr(campaign, "send_all_as_text", False):
+        return False
+    if getattr(campaign, "send_first_as_text", False) and position == 0:
+        return False
+    html = bool(is_html) if is_html is not None else bool(re.search(r"<[a-zA-Z][^>]*>", body or ""))
+    if not html and (getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False)):
+        html = True  # tracking upgrades plain text to HTML
+    return html
+
+
+def _texts(campaign, position: int, subject, body, is_html, preview) -> tuple:
+    """The templates the sender would render for one candidate: subject, body, preview if HTML."""
+    return (subject, body, preview if _step_is_html(campaign, position, is_html, body) else None)
+
+
 async def missing_vars_report(db, campaign_id: int) -> dict:
-    """Before anything is sent: how many enrolled leads lack which template variables."""
+    """Before anything is sent: how many enrolled leads lack which template variables.
+
+    Mirrors what the sender renders: standard steps contribute the default content and every
+    enabled A/B variant (any of them may be drawn); a personalized step contributes, per lead,
+    that lead's override, or the step's fallback when there is none.
+    """
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
-    from app.models import CampaignLead, Lead, Sequence
+    from app.models import Campaign, CampaignLead, CustomEmailOverride, Lead, Sequence
     from app.sender import _BUILTIN_TEMPLATE_VARS, get_lead_data
 
+    campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
     seqs = (await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.campaign_id == campaign_id)
     )).scalars().all()
-    texts: list = []
+    skip = _BUILTIN_TEMPLATE_VARS | {"unsubscribe_link"}
+
+    static: set[str] = set()
+    personalized = []
     for s in seqs:
-        texts += [s.subject, s.body, s.preview_text, s.fallback_subject, s.fallback_body]
-        texts += [t for v in s.variants if v.enabled for t in (v.subject, v.body, v.preview_text)]
-    needed = template_var_names(*texts) - _BUILTIN_TEMPLATE_VARS - {"unsubscribe_link"}
-    if not needed:
-        return {"leads_missing": 0, "variables": {}}
-    leads = (await db.execute(
-        select(Lead).join(CampaignLead, CampaignLead.lead_id == Lead.id).where(CampaignLead.campaign_id == campaign_id)
-    )).scalars().all()
+        if getattr(s, "sequence_type", "standard") == "personalized":
+            personalized.append(s)
+            continue
+        static.update(template_var_names(*_texts(campaign, s.position, s.subject, s.body, s.is_html, s.preview_text)))
+        for v in s.variants:
+            if not v.enabled:
+                continue
+            body = v.body if v.body else s.body
+            is_html = v.is_html if v.is_html is not None else s.is_html
+            preview = v.preview_text if v.preview_text is not None else s.preview_text
+            subject = v.subject if v.subject is not None else s.subject
+            static.update(template_var_names(*_texts(campaign, s.position, subject, body, is_html, preview)))
+    static -= skip
+
+    rows = (await db.execute(
+        select(Lead, CampaignLead.id)
+        .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+    )).all()
+    overrides: dict[tuple[int, int], object] = {}
+    if personalized and rows:
+        ov_rows = (await db.execute(
+            select(CustomEmailOverride).where(
+                CustomEmailOverride.campaign_lead_id.in_([cl_id for _, cl_id in rows]),
+                CustomEmailOverride.sequence_id.in_([s.id for s in personalized]),
+            )
+        )).scalars().all()
+        overrides = {(o.campaign_lead_id, o.sequence_id): o for o in ov_rows}
+
     counts: dict[str, int] = {}
     leads_missing = 0
-    for lead in leads:
+    for lead, cl_id in rows:
+        needed = set(static)
+        for s in personalized:
+            subject, body, is_html, preview = s.subject, s.body, s.is_html, s.preview_text
+            ov = overrides.get((cl_id, s.id))
+            if ov is not None:
+                if ov.subject is not None:
+                    subject = ov.subject
+                elif s.fallback_subject:
+                    subject = s.fallback_subject
+                if ov.body is not None:
+                    body = ov.body
+                elif s.fallback_body:
+                    body = s.fallback_body
+                if ov.is_html is not None:
+                    is_html = ov.is_html
+            else:
+                if s.fallback_subject:
+                    subject = s.fallback_subject
+                if s.fallback_body:
+                    body = s.fallback_body
+            needed.update(template_var_names(*_texts(campaign, s.position, subject, body, is_html, preview)) - skip)
+        if not needed:
+            continue
         data = get_lead_data(lead)
         gaps = [n for n in needed if data.get(n) is None or not str(data.get(n)).strip()]
         if gaps:
