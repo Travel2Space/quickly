@@ -18,7 +18,7 @@ from app.models import (
     Inbox, QueueSlot, LeadUnsubscribeToken,
 )
 from app.routers.tracking import (
-    open_pixel, click_redirect, unsubscribe, caddy_ask, tracking_probe,
+    open_pixel, click_redirect, unsubscribe_one_click, caddy_ask, tracking_probe,
 )
 from tests.conftest import (
     make_inbox, make_campaign, make_sequence, make_lead,
@@ -340,7 +340,7 @@ async def test_click_redirect_fires_webhook(session, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# GET /u/{token} — unsubscribe
+# POST /u/{token} — unsubscribe
 # ---------------------------------------------------------------------------
 
 
@@ -366,7 +366,7 @@ async def _setup_unsubscribe(session):
 async def test_unsubscribe_invalid_token_returns_404(session, monkeypatch):
     monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
-    resp = await unsubscribe(token="no-such-token", db=session)
+    resp = await unsubscribe_one_click(token="no-such-token", db=session)
 
     assert resp.status_code == 404
 
@@ -378,7 +378,7 @@ async def test_unsubscribe_marks_enrollment_unsubscribed(session, monkeypatch):
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
     assert cl.enrollment_status != "unsubscribed"
 
-    await unsubscribe(token=token_str, db=session)
+    await unsubscribe_one_click(token=token_str, db=session)
 
     await session.refresh(cl)
     assert cl.enrollment_status == "unsubscribed"
@@ -401,7 +401,7 @@ async def test_unsubscribe_deletes_queue_slots(session, monkeypatch):
     session.add(slot)
     await session.flush()
 
-    await unsubscribe(token=token_str, db=session)
+    await unsubscribe_one_click(token=token_str, db=session)
 
     result = await session.execute(
         select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
@@ -415,7 +415,7 @@ async def test_unsubscribe_returns_html_page(session, monkeypatch):
 
     _, _, _, token_str = await _setup_unsubscribe(session)
 
-    resp = await unsubscribe(token=token_str, db=session)
+    resp = await unsubscribe_one_click(token=token_str, db=session)
 
     assert resp.status_code == 200
     assert "text/html" in resp.media_type
@@ -430,7 +430,7 @@ async def test_unsubscribe_already_unsubscribed_shows_different_page(session, mo
     cl.enrollment_status = "unsubscribed"
     await session.flush()
 
-    resp = await unsubscribe(token=token_str, db=session)
+    resp = await unsubscribe_one_click(token=token_str, db=session)
 
     assert resp.status_code == 200
     assert b"already unsubscribed" in resp.body.lower()
@@ -447,7 +447,7 @@ async def test_unsubscribe_fires_webhooks(session, monkeypatch):
 
     _, _, _, token_str = await _setup_unsubscribe(session)
 
-    await unsubscribe(token=token_str, db=session)
+    await unsubscribe_one_click(token=token_str, db=session)
 
     assert "lead.unsubscribed" in events
     assert "lead.status_changed" in events
@@ -466,7 +466,7 @@ async def test_unsubscribe_already_done_does_not_fire_webhooks(session, monkeypa
     cl.enrollment_status = "unsubscribed"
     await session.flush()
 
-    await unsubscribe(token=token_str, db=session)
+    await unsubscribe_one_click(token=token_str, db=session)
 
     assert "lead.unsubscribed" not in events
 

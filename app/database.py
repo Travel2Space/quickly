@@ -216,6 +216,11 @@ async def _run_migrations(conn) -> None:
         # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
         "ALTER TABLE queue_slot ADD COLUMN IF NOT EXISTS blocked_missing_vars JSON NULL",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS suppressed_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS suppressed_reason VARCHAR(64) NULL",
+        "CREATE INDEX IF NOT EXISTS ix_lead_suppressed_at ON lead (suppressed_at)",
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS list_unsubscribe_url_template VARCHAR(1024) NULL",
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS list_unsubscribe_mailto VARCHAR(255) NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

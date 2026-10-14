@@ -21,10 +21,10 @@ def notify_once(key: Hashable, min_gap: float = 0.0) -> bool:
     """
     if key in _open:
         return False
-    _open.add(key)
     now = time.monotonic()
     if now - _last_sent.get(key, float("-inf")) < min_gap:
-        return False
+        return False  # not marked open: the next call re-checks the gap
+    _open.add(key)
     _last_sent[key] = now
     return True
 
@@ -120,12 +120,15 @@ async def missing_vars_report(db, campaign_id: int) -> dict:
     from app.sender import _BUILTIN_TEMPLATE_VARS, get_lead_data
 
     campaign = (await db.execute(select(Campaign).where(Campaign.id == campaign_id))).scalar_one_or_none()
+    own_tpl = (getattr(campaign, "list_unsubscribe_url_template", None) or "").strip()
     seqs = (await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.campaign_id == campaign_id)
     )).scalars().all()
-    skip = _BUILTIN_TEMPLATE_VARS | {"unsubscribe_link"}
+    # With an own unsubscribe URL the built-in {{unsubscribe_link}} does not exist, and the
+    # URL template itself is rendered strictly for every lead.
+    skip = _BUILTIN_TEMPLATE_VARS | (set() if own_tpl else {"unsubscribe_link"})
 
-    static: set[str] = set()
+    static: set[str] = set(template_var_names(own_tpl)) if own_tpl else set()
     personalized = []
     for s in seqs:
         if getattr(s, "sequence_type", "standard") == "personalized":

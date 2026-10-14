@@ -18,7 +18,9 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
+from app.presend import PresendUnavailable, load_presend_config, presend_check
 from app.send_prep import clear_missing_var_blocks, missing_vars_report, reset_campaign_incidents
+from app.suppression import is_suppressed
 from app.models import (
     Campaign,
     Sequence,
@@ -100,6 +102,8 @@ def _campaign_to_response(
         track_clicks=bool(getattr(campaign, 'track_clicks', False)),
         add_unsubscribe_header=bool(getattr(campaign, 'add_unsubscribe_header', True)),
         add_one_click_unsubscribe=bool(getattr(campaign, 'add_one_click_unsubscribe', True)),
+        list_unsubscribe_url_template=getattr(campaign, 'list_unsubscribe_url_template', None),
+        list_unsubscribe_mailto=getattr(campaign, 'list_unsubscribe_mailto', None),
         send_first_as_text=bool(getattr(campaign, 'send_first_as_text', False)),
         send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
         timezone=getattr(campaign, 'timezone', None),
@@ -298,6 +302,8 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         track_clicks=data.track_clicks,
         add_unsubscribe_header=data.add_unsubscribe_header,
         add_one_click_unsubscribe=data.add_one_click_unsubscribe,
+        list_unsubscribe_url_template=data.list_unsubscribe_url_template,
+        list_unsubscribe_mailto=data.list_unsubscribe_mailto,
         send_first_as_text=data.send_first_as_text,
         send_all_as_text=data.send_all_as_text,
         timezone=data.timezone,
@@ -560,6 +566,15 @@ async def update_campaign(
         campaign.add_unsubscribe_header = data.add_unsubscribe_header
     if data.add_one_click_unsubscribe is not None:
         campaign.add_one_click_unsubscribe = data.add_one_click_unsubscribe
+    # Own unsubscribe endpoint: null/empty clears it. Slots parked for a missing
+    # token/link are retried only when the template really changed.
+    if "list_unsubscribe_url_template" in data.model_fields_set:
+        if campaign.list_unsubscribe_url_template != data.list_unsubscribe_url_template:
+            campaign.list_unsubscribe_url_template = data.list_unsubscribe_url_template
+            await db.flush()
+            await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    if "list_unsubscribe_mailto" in data.model_fields_set:
+        campaign.list_unsubscribe_mailto = data.list_unsubscribe_mailto
     if data.send_first_as_text is not None:
         campaign.send_first_as_text = data.send_first_as_text
     if data.send_all_as_text is not None:
@@ -640,6 +655,8 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
         track_clicks=original.track_clicks,
         add_unsubscribe_header=original.add_unsubscribe_header,
         add_one_click_unsubscribe=original.add_one_click_unsubscribe,
+        list_unsubscribe_url_template=original.list_unsubscribe_url_template,
+        list_unsubscribe_mailto=original.list_unsubscribe_mailto,
         send_first_as_text=original.send_first_as_text,
         send_all_as_text=original.send_all_as_text,
         match_lead_provider=original.match_lead_provider,
@@ -1667,6 +1684,31 @@ class TestEmailRequest(BaseModel):
     variant_id: int | None = None  # If set, send this A/B variant's content
 
 
+async def _check_test_email_recipient(db: AsyncSession, campaign_id: int, seq, to_email: str) -> None:
+    """A test email to an address that is a lead is checked like a send to that lead (Q-3/Q-4).
+
+    An address that is not among the leads is the operator's own test address and goes out
+    as before; asking the pre-send hook about it would answer email_mismatch every time.
+    """
+    to_norm = to_email.strip().lower()
+    if await is_suppressed(db, to_norm):
+        raise HTTPException(422, "address is suppressed")
+    cfg = await load_presend_config(db)
+    if cfg is None:
+        return
+    target = (await db.execute(
+        select(Lead).where(func.lower(Lead.email) == to_norm).order_by(Lead.id).limit(1)
+    )).scalar_one_or_none()
+    if target is None:
+        return
+    try:
+        allowed, reason = await presend_check(cfg, lead=target, campaign_id=campaign_id, step=seq.position)
+    except PresendUnavailable as exc:
+        raise HTTPException(503, f"pre-send check unavailable: {exc}")
+    if not allowed:
+        raise HTTPException(422, f"pre-send check refused: {reason}")
+
+
 @router.post("/{campaign_id}/send-test")
 async def send_test_email(
     campaign_id: int,
@@ -1690,6 +1732,8 @@ async def send_test_email(
     campaign = camp_result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
+
+    await _check_test_email_recipient(db, campaign_id, seq, data.to_email)
 
     # Get the first inbox for this campaign
     inbox_res = await db.execute(
@@ -2090,6 +2134,7 @@ async def bulk_add_leads_to_campaign(
     results = []
     added = 0
     already_enrolled = 0
+    suppressed = 0
     errors = 0
     duplicate_leads: list[str] = []
     # Track new enrollments for bulk scheduling after provider detection
@@ -2103,6 +2148,10 @@ async def bulk_add_leads_to_campaign(
             continue
 
         try:
+            if await is_suppressed(db, email):  # case-insensitive, before any find-or-create
+                results.append({"email": email, "status": "suppressed", "reason": None})
+                suppressed += 1
+                continue
             # Find or create lead by email
             lead_result = await db.execute(select(Lead).where(Lead.email == email))
             lead = lead_result.scalar_one_or_none()
@@ -2127,6 +2176,11 @@ async def bulk_add_leads_to_campaign(
                 if changed:
                     await db.flush()
                     await clear_missing_var_blocks(db, lead_id=lead.id)
+
+            if lead.suppressed_at is not None:
+                results.append({"email": email, "status": "suppressed", "reason": lead.suppressed_reason})
+                suppressed += 1
+                continue
 
             # Check enrollment
             if skip_duplicates:
@@ -2265,6 +2319,7 @@ async def bulk_add_leads_to_campaign(
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "suppressed": suppressed,
         "duplicate_leads": duplicate_leads,
         "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
@@ -2787,6 +2842,7 @@ async def import_campaign_leads(
 
     added = 0
     already_enrolled = 0
+    suppressed = 0
     errors = 0
     duplicates_in_batch = 0
     duplicate_leads: list[str] = []
@@ -2838,6 +2894,11 @@ async def import_campaign_leads(
                     return v if v else None
             return None
 
+        if await is_suppressed(db, email):  # case-insensitive, before any find-or-create
+            results_list.append({"row": row_num, "email": email, "status": "suppressed", "reason": None})
+            suppressed += 1
+            continue
+
         try:
             lead_result = await db.execute(select(Lead).where(Lead.email == email))
             lead = lead_result.scalar_one_or_none()
@@ -2858,6 +2919,11 @@ async def import_campaign_leads(
                 if changed:
                     await db.flush()
                     await clear_missing_var_blocks(db, lead_id=lead.id)
+
+            if lead.suppressed_at is not None:
+                results_list.append({"row": row_num, "email": email, "status": "suppressed", "reason": lead.suppressed_reason})
+                suppressed += 1
+                continue
 
             if skip_duplicates:
                 # Global check: skip if enrolled in any campaign
@@ -2977,10 +3043,11 @@ async def import_campaign_leads(
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "suppressed": suppressed,
         "duplicate_leads": duplicate_leads,
         "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
-        "total_rows": added + already_enrolled + duplicates_in_batch + errors,
+        "total_rows": added + already_enrolled + suppressed + duplicates_in_batch + errors,
         "verification_queued": verify_emails and bool(added_lead_ids_csv),
         "missing_vars": await missing_vars_report(db, campaign_id),
     }

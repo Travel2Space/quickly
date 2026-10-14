@@ -404,6 +404,10 @@ async def send_test_email(
     if "@" not in to_email:
         raise HTTPException(400, "A valid to_email is required")
 
+    from app.suppression import is_suppressed
+    if await is_suppressed(db, to_email):
+        raise HTTPException(422, "address is suppressed")
+
     await _get_smtp_inbox(db, inbox_id)
     result = await db.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox_id))
     acct = result.scalar_one_or_none()

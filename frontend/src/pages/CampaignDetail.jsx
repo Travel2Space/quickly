@@ -1832,6 +1832,8 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     track_clicks:          campaign.track_clicks          ?? false,
     add_unsubscribe_header:campaign.add_unsubscribe_header ?? true,
     add_one_click_unsubscribe: campaign.add_one_click_unsubscribe ?? true,
+    list_unsubscribe_url_template: campaign.list_unsubscribe_url_template ?? '',
+    list_unsubscribe_mailto: campaign.list_unsubscribe_mailto ?? '',
     send_first_as_text:    campaign.send_first_as_text    ?? false,
     send_all_as_text:      campaign.send_all_as_text      ?? false,
     match_lead_provider:   campaign.match_lead_provider   ?? true,
@@ -1985,6 +1987,25 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
               </label>
             ))}
           </div>
+        </div>
+
+        {/* Own unsubscribe endpoint */}
+        <div className="space-y-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Own unsubscribe URL (List-Unsubscribe), e.g. https://example.com/unsubscribe?t={'{{token}}'}
+          </label>
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+            value={form.list_unsubscribe_url_template}
+            onChange={e => setForm(f => ({ ...f, list_unsubscribe_url_template: e.target.value }))}
+          />
+          <label className="block text-sm font-medium text-gray-700">Unsubscribe mailto address</label>
+          <input
+            className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+            value={form.list_unsubscribe_mailto}
+            onChange={e => setForm(f => ({ ...f, list_unsubscribe_mailto: e.target.value }))}
+          />
+          <p className="text-xs text-gray-400">When set, the built-in {'{{unsubscribe_link}}'} is not available in this campaign.</p>
         </div>
 
         {/* Sending days */}

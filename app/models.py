@@ -147,6 +147,10 @@ class Lead(Base):
     # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
     provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)
+    # Global opt-out (Q-3): set = never mailed by any campaign. Keyed by address in practice:
+    # app.suppression stamps every lead row sharing the (lower-cased) email.
+    suppressed_at = Column(DateTime, nullable=True, default=None, index=True)
+    suppressed_reason = Column(String(64), nullable=True, default=None)
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
     replies = relationship("LeadReply", back_populates="lead")
@@ -178,6 +182,10 @@ class Campaign(Base):
     # RFC 8058 one-click header (List-Unsubscribe-Post). Required by Gmail/Yahoo
     # bulk-sender rules; disable if Gmail's Promotions classifier is an issue.
     add_one_click_unsubscribe = Column(Boolean, default=True, nullable=False)
+    # Own unsubscribe endpoint (Q-1). When set, List-Unsubscribe points here (rendered per
+    # lead, strict) and the built-in /u/ link and token are not used for this campaign.
+    list_unsubscribe_url_template = Column(String(1024), nullable=True, default=None)
+    list_unsubscribe_mailto = Column(String(255), nullable=True, default=None)
     # Plain-text sending options
     send_first_as_text = Column(Boolean, default=False, nullable=False)  # Force seq 0 to plain text
     send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text
@@ -972,4 +980,6 @@ WEBHOOK_EVENT_TYPES = [
     "inbox.send_failing",  # An SMTP inbox failed to send repeatedly (see data.last_send_error)
     "send.step_missing",   # A queued email points at a step the campaign no longer has
     "send.blocked_missing_vars",  # A lead lacks template variables; its email is held
+    "presend.denied",      # The pre-send check refused an email (see data.reason, data.suppressed)
+    "presend.unavailable", # The pre-send check gave no usable answer; emails are held
 ]

@@ -9,6 +9,7 @@ import { Button } from '../components/ui/Button';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
+import PresendSettings from '../components/PresendSettings';
 
 const SETTINGS_TABS = [
   { id: 'general', label: 'General' },
@@ -1735,6 +1736,14 @@ export default function Settings() {
               Verify new leads automatically when they are added to a campaign.
             </p>
             <EmailVerificationSettings />
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-base font-semibold text-gray-800 dark:text-gray-100">Pre-send check</h3>
+            <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+              Ask an external stop-list before every email.
+            </p>
+            <PresendSettings />
           </div>
         </section>
           </>

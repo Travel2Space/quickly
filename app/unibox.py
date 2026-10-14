@@ -33,6 +33,7 @@ from app.models import (
 from app.routers.gmail_oauth import refresh_access_token
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
 from app.campaign_lead_status import ENROLLMENT_STATUSES, LEAD_INTERESTS
+from app.suppression import suppress_email
 
 log = logging.getLogger("quickly.unibox")
 
@@ -1139,8 +1140,8 @@ async def _upsert_message_from_gmail(
                     b_lead_res = await db.execute(
                         select(Lead).where(func.lower(Lead.email) == bounced_addr)
                     )
-                    b_lead = b_lead_res.scalar_one_or_none()
-                    if b_lead is not None:
+                    b_leads = b_lead_res.scalars().all()
+                    for b_lead in b_leads:
                         b_rows = (
                             await db.execute(
                                 select(CampaignLead).where(CampaignLead.lead_id == b_lead.id)
@@ -1190,6 +1191,8 @@ async def _upsert_message_from_gmail(
                                     log.exception(
                                         "Failed to fire bounce webhook for lead_id=%s", b_lead.id
                                     )
+                    if b_leads:
+                        await suppress_email(db, bounced_addr, "bounce")
     # -----------------------------------------------------------------------
 
     # ---------- Sent-to-lead detection (outbound messages only) ----------
@@ -1787,8 +1790,8 @@ async def _process_smtp_inbound_message(
             )
             if bounced_addr:
                 b_lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == bounced_addr))
-                b_lead = b_lead_res.scalar_one_or_none()
-                if b_lead is not None:
+                b_leads = b_lead_res.scalars().all()
+                for b_lead in b_leads:
                     b_rows = (
                         await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
                     ).scalars().all()
@@ -1829,6 +1832,8 @@ async def _process_smtp_inbound_message(
                                 })
                             except Exception:
                                 log.exception("Failed to fire SMTP bounce webhook for lead_id=%s", b_lead.id)
+                if b_leads:
+                    await suppress_email(db, bounced_addr, "bounce")
             await db.flush()
             return row, True, (inbox.id, thread_key)
 
@@ -4133,59 +4138,60 @@ async def _detect_o365_lead_replies(
         b_lead_res = await db.execute(
             select(Lead).where(func.lower(Lead.email) == bounced_addr)
         )
-        b_lead = b_lead_res.scalar_one_or_none()
-        if b_lead is None:
-            continue
-        b_rows_o365 = (
-            await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
-        ).scalars().all()
-        if not b_rows_o365 or all(
-            getattr(r, "enrollment_status", None) in ("bounced", "unsubscribed")
-            for r in b_rows_o365
-        ):
-            continue
+        b_leads = b_lead_res.scalars().all()
+        for b_lead in b_leads:
+            b_rows_o365 = (
+                await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
+            ).scalars().all()
+            if not b_rows_o365 or all(
+                getattr(r, "enrollment_status", None) in ("bounced", "unsubscribed")
+                for r in b_rows_o365
+            ):
+                continue
 
-        log.info(
-            "O365 NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
-            b_lead.id, bounced_addr, inbox.id,
-        )
-        for _bcl in b_rows_o365:
-            _bcl.enrollment_status = "bounced"
-        b_cl_ids = [r.id for r in b_rows_o365]
-        if b_cl_ids:
-            await db.execute(
-                delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids))
+            log.info(
+                "O365 NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
+                b_lead.id, bounced_addr, inbox.id,
             )
-        await db.flush()
+            for _bcl in b_rows_o365:
+                _bcl.enrollment_status = "bounced"
+            b_cl_ids = [r.id for r in b_rows_o365]
+            if b_cl_ids:
+                await db.execute(
+                    delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids))
+                )
+            await db.flush()
 
-        b_camp_res = await db.execute(
-            select(CampaignLead.campaign_id).where(
-                CampaignLead.lead_id == b_lead.id
-            ).distinct()
-        )
-        for (b_camp_id,) in b_camp_res.all():
-            try:
-                from app.webhooks import fire_webhook_event as _fwe
-                await _fwe(db, "email.bounced", {
-                    "lead_id": b_lead.id,
-                    "lead_email": b_lead.email,
-                    "campaign_id": b_camp_id,
-                    "inbox_id": inbox.id,
-                    "error_type": "bounce",
-                    "error_message": subject_ndr[:300],
-                    "timestamp": time_provider.utcnow().isoformat() + "Z",
-                })
-                await _fwe(db, "lead.status_changed", {
-                    "lead_id": b_lead.id,
-                    "lead_email": b_lead.email,
-                    "campaign_id": b_camp_id,
-                    "old_enrollment_status": "active",
-                    "new_enrollment_status": "bounced",
-                    "reason": f"NDR from {from_addr_ndr}",
-                    "timestamp": time_provider.utcnow().isoformat() + "Z",
-                })
-            except Exception:
-                log.exception("Failed to fire bounce webhook for lead_id=%s", b_lead.id)
+            b_camp_res = await db.execute(
+                select(CampaignLead.campaign_id).where(
+                    CampaignLead.lead_id == b_lead.id
+                ).distinct()
+            )
+            for (b_camp_id,) in b_camp_res.all():
+                try:
+                    from app.webhooks import fire_webhook_event as _fwe
+                    await _fwe(db, "email.bounced", {
+                        "lead_id": b_lead.id,
+                        "lead_email": b_lead.email,
+                        "campaign_id": b_camp_id,
+                        "inbox_id": inbox.id,
+                        "error_type": "bounce",
+                        "error_message": subject_ndr[:300],
+                        "timestamp": time_provider.utcnow().isoformat() + "Z",
+                    })
+                    await _fwe(db, "lead.status_changed", {
+                        "lead_id": b_lead.id,
+                        "lead_email": b_lead.email,
+                        "campaign_id": b_camp_id,
+                        "old_enrollment_status": "active",
+                        "new_enrollment_status": "bounced",
+                        "reason": f"NDR from {from_addr_ndr}",
+                        "timestamp": time_provider.utcnow().isoformat() + "Z",
+                    })
+                except Exception:
+                    log.exception("Failed to fire bounce webhook for lead_id=%s", b_lead.id)
+        if b_leads:
+            await suppress_email(db, bounced_addr, "bounce")
 
 
 async def _detect_o365_sent_to_lead(

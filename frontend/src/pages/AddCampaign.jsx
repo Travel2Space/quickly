@@ -20,6 +20,8 @@ export default function AddCampaign() {
     // Unsubscribe
     add_unsubscribe_header: true,
     add_one_click_unsubscribe: true,
+    list_unsubscribe_url_template: '',
+    list_unsubscribe_mailto: '',
     // sending format
     send_first_as_text: false,
     send_all_as_text: false,
@@ -246,6 +248,21 @@ export default function AddCampaign() {
                 some senders disable it if Gmail routes mail to Promotions
               </span>
             </label>
+            <Input
+              label="Own unsubscribe URL (List-Unsubscribe), e.g. https://example.com/unsubscribe?t={{token}}"
+              name="list_unsubscribe_url_template"
+              value={form.list_unsubscribe_url_template}
+              onChange={handleChange}
+            />
+            <Input
+              label="Unsubscribe mailto address"
+              name="list_unsubscribe_mailto"
+              value={form.list_unsubscribe_mailto}
+              onChange={handleChange}
+            />
+            <p className="text-xs text-gray-500">
+              When set, the built-in {'{{unsubscribe_link}}'} is not available in this campaign.
+            </p>
           </div>
         </div>
 
