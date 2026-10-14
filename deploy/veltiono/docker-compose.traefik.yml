@@ -8,7 +8,10 @@ services:
       - traefik.http.routers.quickly.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
       - traefik.http.services.quickly.loadbalancer.server.port=8000
       - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
-    networks: [default, traefik]
+    networks:
+      default: {}
+      traefik:
+        aliases: [quickly-app]   # unique DNS name on the shared network (`app` collides with other stacks)
 
 networks:
   traefik:

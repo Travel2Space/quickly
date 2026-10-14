@@ -36,7 +36,10 @@ services:
       QUICKLY_PREBUILT_IMAGE: "1"
       # The proxy reaches the container from the Docker network, not 127.0.0.1: without this
       # uvicorn ignores X-Forwarded-For/Proto and every client looks like the gateway IP
-      # (shared rate limits, wrong scheme). Safe: the port is published on loopback only.
+      # (shared rate limits, wrong scheme). "*" trusts whoever can reach the port: with the nginx
+      # overlay that is only the host's nginx (port published on loopback only); with the Traefik
+      # overlay it is EVERY container on the shared traefik network, so keep untrusted
+      # containers off that network.
       FORWARDED_ALLOW_IPS: "*"
     logging: *logging
 
