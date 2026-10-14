@@ -144,6 +144,20 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
                 f"**{inbox_email}**'s OAuth token could not be refreshed. "
                 f"Please reconnect the inbox."
             )
+    elif event_type == "send.step_missing":
+        title = f"Step {data.get('sequence_index')} is missing in campaign #{campaign_id}"
+        message = (
+            f"A queued email points at step **{data.get('sequence_index')}** (0-based), but the "
+            f"campaign has no such step, so nothing was sent. Re-create the step or recalculate the queue."
+        )
+    elif event_type == "send.blocked_missing_vars":
+        lead_email = data.get("lead_email", "a lead")
+        missing = ", ".join(data.get("missing") or [])
+        title = f"Email not sent — missing variables for {lead_email}"
+        message = (
+            f"**{lead_email}** has no value for: **{missing}**. The email is held; it goes out "
+            f"after you fill these in on the lead (or fix the step)."
+        )
     else:
         title = f"Quickly notification — {event_type}"
         message = f"Event: {event_type} at {ts}"

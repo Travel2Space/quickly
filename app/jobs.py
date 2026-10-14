@@ -38,8 +38,9 @@ from app.models import (
     Office365Message,
     CustomEmailOverride,
 )
-from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
+from app.sender import MissingTemplateVars, send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
+from app.send_prep import notify_once, render_all_strict, reply_subject
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -243,6 +244,7 @@ async def run_send_job():
                     QueueSlot.inbox_id == inbox.id,
                     func.date(QueueSlot.scheduled_date) == today,
                     QueueSlot.scheduled_date <= now,
+                    QueueSlot.blocked_missing_vars.is_(None),
                 )
                 .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
             )
@@ -538,16 +540,23 @@ async def run_send_job():
                     all_logs = all_logs_result.scalars().all()
 
                     if all_logs:
-                        # In-Reply-To = most recent message (direct parent)
-                        reply_to_msg_id = all_logs[-1].message_id
-                        # References = ALL message IDs in order (space-separated)
+                        anchor = next(
+                            (e for e in reversed(all_logs)
+                             if e.subject and e.subject.strip() and e.subject != "(no subject)"),
+                            all_logs[-1],
+                        )
+                        # The chain is the thread being answered: a step with its own subject opened
+                        # a new thread, and earlier threads must not leak into References.
+                        upto_anchor = all_logs[: all_logs.index(anchor) + 1]
+                        # Without a thread id there is no way to tell threads apart: keep the old behaviour.
+                        chain = [e for e in upto_anchor if e is anchor or e.thread_id == anchor.thread_id] if anchor.thread_id else upto_anchor
+                        reply_to_msg_id = anchor.message_id
                         references_chain = " ".join(
                             (mid if mid.startswith("<") else f"<{mid}>")
-                            for log_entry in all_logs
+                            for log_entry in chain
                             if (mid := log_entry.message_id)
                         )
-                        # Gmail threadId from most recent
-                        prev_thread_id = all_logs[-1].thread_id
+                        prev_thread_id = anchor.thread_id
                         # Guard: reject a thread_id that belongs to a *different* campaign
                         # for this lead.  Gmail may subject-match the very first email of
                         # this campaign into an existing thread from a previous campaign with
@@ -568,27 +577,17 @@ async def run_send_job():
                                     prev_thread_id, lead.id,
                                 )
                                 prev_thread_id = None
-                        # Subject: Re: <original subject> from the FIRST email that had a real subject
-                        first_with_subject = next(
-                            (e for e in all_logs if e.subject and e.subject.strip() and e.subject != "(no subject)"),
-                            None,
-                        )
-                        if first_with_subject:
-                            orig_subj = first_with_subject.subject
-                            if orig_subj.lower().startswith("re: "):
-                                subject = orig_subj
-                            else:
-                                subject = f"Re: {orig_subj}"
-                        else:
-                            subject = "(no subject)"
+                        # Subject: Re: <subject of the email being answered>
+                        real = anchor.subject and anchor.subject.strip() and anchor.subject != "(no subject)"
+                        subject = reply_subject(anchor.subject) if real else "(no subject)"
 
                         # Fetch the previous email's body for quoting from the
                         # sequence/variant definition.  This is always available
                         # (no dependency on Gmail/O365 unibox sync) and is
                         # campaign-scoped by construction, so quoting can never
                         # accidentally include content from a different campaign's thread.
-                        prev_sent_at = all_logs[-1].sent_at
-                        _prev_log = all_logs[-1]
+                        prev_sent_at = anchor.sent_at
+                        _prev_log = anchor
                         _prev_seq_row = await session.execute(
                             select(Sequence).where(
                                 Sequence.campaign_id == campaign.id,
@@ -660,10 +659,6 @@ async def run_send_job():
                 else:
                     subject = seq_subject.strip()
 
-                # Apply lead-data variable substitution to the subject line
-                # (same {{firstName}} / {{company}} etc. tokens as the body).
-                subject = render_body(subject, get_lead_data(lead))
-
                 # ── Determine HTML mode ──────────────────────────────────────
                 # Override chain (highest → lowest priority):
                 #   1. Settings-level text-only (send_all_as_text / send_first_as_text)
@@ -728,14 +723,22 @@ async def run_send_job():
                 lead_data = get_lead_data(lead)
                 lead_data["unsubscribe_link"] = unsub_url
 
-                body = render_body(seq_body, lead_data)
+                try:
+                    rendered = render_all_strict(
+                        {"subject": subject, "body": seq_body,
+                         "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                        lead_data,
+                    )
+                except MissingTemplateVars as exc:
+                    await _block_slot_missing_vars(session, slot, campaign, lead, exc.names)
+                    continue
+                subject, body = rendered["subject"], rendered["body"]
                 # Inject hidden preheader so email clients show the custom preview text.
-                if is_html and seq_preview_text:
-                    rendered_preview = render_body(seq_preview_text, lead_data)
+                if rendered["preview"]:
                     preheader = (
                         '<div style="display:none !important; visibility:hidden; '
                         'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
-                        f'{rendered_preview}</div>'
+                        f'{rendered["preview"]}</div>'
                     )
                     body = preheader + body
                 from_addr = inbox.email
@@ -1119,6 +1122,23 @@ async def run_send_job():
 # Per-slot job: fired by APScheduler at the slot's exact scheduled_date
 # ---------------------------------------------------------------------------
 
+async def _block_slot_missing_vars(session, slot, campaign, lead, names: list[str]) -> None:
+    """Park a slot whose templates have unfilled variables (Q-5): nothing is sent."""
+    slot.blocked_missing_vars = names
+    log.warning(
+        "send: slot %d parked – lead %d in campaign %d lacks %s",
+        slot.id, lead.id, campaign.id, ", ".join(names),
+    )
+    # A re-park with the same names (e.g. after an unrelated edit un-parked the slot)
+    # stays silent; different names notify again.
+    if notify_once(("blocked", slot.id, tuple(names))):
+        await fire_webhook_event(session, "send.blocked_missing_vars", {
+            "campaign_id": campaign.id, "lead_id": lead.id, "lead_email": lead.email,
+            "missing": names, "slot_id": slot.id,
+        })
+    await session.commit()
+
+
 async def send_slot_job(slot_id: int) -> None:
     """Send a single queue slot identified by *slot_id*.
 
@@ -1151,7 +1171,47 @@ async def send_slot_job(slot_id: int) -> None:
         )
         row = slot_res.first()
         if not row:
-            log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
+            orphan = (await session.execute(
+                select(QueueSlot.sequence_index, QueueSlot.inbox_id, CampaignLead.campaign_id)
+                .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+                .where(QueueSlot.id == slot_id)
+            )).first()
+            if orphan is None:
+                log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
+                return
+            seq_idx, orphan_inbox_id, camp_id = orphan
+            step_exists = (await session.execute(
+                select(Sequence.id).where(
+                    Sequence.campaign_id == camp_id, Sequence.position == seq_idx
+                ).limit(1)
+            )).first() is not None
+            if not step_exists:
+                if notify_once(("step_missing", camp_id, seq_idx)):
+                    log.error(
+                        "send_slot_job: no step for index %d in campaign %d (slot %d) – not sent",
+                        seq_idx, camp_id, slot_id,
+                    )
+                    await fire_webhook_event(session, "send.step_missing", {
+                        "campaign_id": camp_id, "sequence_index": seq_idx, "slot_id": slot_id,
+                    })
+                    await session.commit()
+                else:
+                    # The scanner re-fires the slot every minute; the incident is already open.
+                    log.debug("send_slot_job: slot %d still has no step %d", slot_id, seq_idx)
+                return
+            inbox_exists = (await session.execute(
+                select(Inbox.id).where(Inbox.id == orphan_inbox_id)
+            )).first() is not None
+            if not inbox_exists:
+                if notify_once(("slot_inbox_missing", camp_id, orphan_inbox_id)):
+                    log.error(
+                        "send_slot_job: slot %d not sent – the slot's inbox is missing (inbox_id=%s)",
+                        slot_id, orphan_inbox_id,
+                    )
+                else:
+                    log.debug("send_slot_job: slot %d still has no inbox %s", slot_id, orphan_inbox_id)
+                return
+            log.warning("send_slot_job: slot %d could not be loaded (campaign/lead rows missing)", slot_id)
             return
 
         slot, cl, campaign, lead, sequence, inbox = row
@@ -1159,6 +1219,8 @@ async def send_slot_job(slot_id: int) -> None:
         # ── Pre-flight checks ────────────────────────────────────────────
         if inbox.paused:
             log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
+            return
+        if slot.blocked_missing_vars:
             return
         if _inbox_auth_cooldown_active(inbox.id, now):
             log.warning(
@@ -1404,13 +1466,23 @@ async def send_slot_job(slot_id: int) -> None:
             all_logs = all_logs_result.scalars().all()
 
             if all_logs:
-                reply_to_msg_id = all_logs[-1].message_id
+                anchor = next(
+                    (e for e in reversed(all_logs)
+                     if e.subject and e.subject.strip() and e.subject != "(no subject)"),
+                    all_logs[-1],
+                )
+                # The chain is the thread being answered: a step with its own subject opened
+                # a new thread, and earlier threads must not leak into References.
+                upto_anchor = all_logs[: all_logs.index(anchor) + 1]
+                # Without a thread id there is no way to tell threads apart: keep the old behaviour.
+                chain = [e for e in upto_anchor if e is anchor or e.thread_id == anchor.thread_id] if anchor.thread_id else upto_anchor
+                reply_to_msg_id = anchor.message_id
                 references_chain = " ".join(
                     (mid if mid.startswith("<") else f"<{mid}>")
-                    for log_entry in all_logs
+                    for log_entry in chain
                     if (mid := log_entry.message_id)
                 )
-                prev_thread_id = all_logs[-1].thread_id
+                prev_thread_id = anchor.thread_id
                 if prev_thread_id:
                     _cross_camp_row = await session.execute(
                         select(EmailLog.id).where(
@@ -1427,19 +1499,11 @@ async def send_slot_job(slot_id: int) -> None:
                         )
                         prev_thread_id = None
 
-                first_with_subject = next(
-                    (e for e in all_logs if e.subject and e.subject.strip()
-                     and e.subject != "(no subject)"),
-                    None,
-                )
-                if first_with_subject:
-                    orig_subj = first_with_subject.subject
-                    subject = orig_subj if orig_subj.lower().startswith("re: ") else f"Re: {orig_subj}"
-                else:
-                    subject = "(no subject)"
+                real = anchor.subject and anchor.subject.strip() and anchor.subject != "(no subject)"
+                subject = reply_subject(anchor.subject) if real else "(no subject)"
 
-                prev_sent_at = all_logs[-1].sent_at
-                _prev_log = all_logs[-1]
+                prev_sent_at = anchor.sent_at
+                _prev_log = anchor
                 _prev_seq_row = await session.execute(
                     select(Sequence).where(
                         Sequence.campaign_id == campaign.id,
@@ -1500,8 +1564,6 @@ async def send_slot_job(slot_id: int) -> None:
         else:
             subject = seq_subject.strip()
 
-        subject = render_body(subject, get_lead_data(lead))
-
         # ── HTML / plain-text decision ────────────────────────────────────
         format_override = None
         if getattr(campaign, "send_all_as_text", False):
@@ -1544,13 +1606,21 @@ async def send_slot_job(slot_id: int) -> None:
         lead_data = get_lead_data(lead)
         lead_data["unsubscribe_link"] = unsub_url
 
-        body = render_body(seq_body, lead_data)
-        if is_html and seq_preview_text:
-            rendered_preview = render_body(seq_preview_text, lead_data)
+        try:
+            rendered = render_all_strict(
+                {"subject": subject, "body": seq_body,
+                 "preview": seq_preview_text if (is_html and seq_preview_text) else None},
+                lead_data,
+            )
+        except MissingTemplateVars as exc:
+            await _block_slot_missing_vars(session, slot, campaign, lead, exc.names)
+            return
+        subject, body = rendered["subject"], rendered["body"]
+        if rendered["preview"]:
             preheader = (
                 '<div style="display:none !important; visibility:hidden; '
                 'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
-                f"{rendered_preview}</div>"
+                f"{rendered['preview']}</div>"
             )
             body = preheader + body
 
@@ -1904,7 +1974,7 @@ async def run_slot_scan_job() -> None:
     async with AsyncSessionLocal() as session:
         due_res = await session.execute(
             select(QueueSlot.id, QueueSlot.scheduled_date)
-            .where(QueueSlot.scheduled_date <= window_end)
+            .where(QueueSlot.scheduled_date <= window_end, QueueSlot.blocked_missing_vars.is_(None))
             .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
         )
         rows = due_res.all()

@@ -18,6 +18,7 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
+from app.send_prep import clear_missing_var_blocks, missing_vars_report, reset_campaign_incidents
 from app.models import (
     Campaign,
     Sequence,
@@ -601,8 +602,11 @@ async def update_campaign(
 
         enqueue_global_recalculate(background_tasks)
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
+    resp = _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+    if data.paused is False and old_paused:
+        resp.missing_vars = await missing_vars_report(db, campaign_id)
     await db.commit()
-    return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+    return resp
 
 
 @router.post("/{campaign_id}/duplicate", response_model=CampaignResponse)
@@ -671,6 +675,12 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
     return _campaign_to_response(new_campaign, inbox_ids)
 
 
+@router.get("/{campaign_id}/missing-vars")
+async def get_missing_vars(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Pre-launch check: enrolled leads lacking template variables (they would be held)."""
+    return await missing_vars_report(db, campaign_id)
+
+
 # ---- Sequences ----
 @router.get("/{campaign_id}/sequences", response_model=list[SequenceResponse])
 async def list_sequences(campaign_id: int, db: AsyncSession = Depends(get_db)):
@@ -681,6 +691,39 @@ async def list_sequences(campaign_id: int, db: AsyncSession = Depends(get_db)):
         .order_by(Sequence.position)
     )
     return result.scalars().all()
+
+
+async def _validate_new_position(db: AsyncSession, campaign_id: int, position: int) -> None:
+    """Steps are 0-based and gapless; a value below the step count inserts and shifts the tail."""
+    n_steps = (await db.execute(
+        select(func.count(Sequence.id)).where(Sequence.campaign_id == campaign_id)
+    )).scalar() or 0
+    if not 0 <= position <= n_steps:
+        raise HTTPException(
+            422,
+            f"position {position} is out of range: steps are 0-based, "
+            f"allowed 0..{n_steps} (next free position is {n_steps})",
+        )
+    if position < n_steps:
+        # Queue slots, email logs and the reply-chain lookup address steps by index; shifting
+        # them under live enrollments would send the wrong text (defect 4). Safe only while empty.
+        enrolled = (await db.execute(
+            select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id).limit(1)
+        )).first()
+        if enrolled is not None:
+            raise HTTPException(
+                422,
+                f"cannot insert a step at position {position}: leads are already enrolled; "
+                f"add it at the end (position {n_steps})",
+            )
+        tail = await db.execute(
+            select(Sequence)
+            .where(Sequence.campaign_id == campaign_id, Sequence.position >= position)
+            .order_by(Sequence.position.desc())
+        )
+        for s in tail.scalars().all():
+            s.position += 1
+        await db.flush()
 
 
 @router.post("/{campaign_id}/sequences", response_model=SequenceResponse)
@@ -694,6 +737,8 @@ async def create_sequence(
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
+    await _validate_new_position(db, campaign_id, data.position)
+    reset_campaign_incidents(campaign_id)
     seq = Sequence(
         campaign_id=campaign_id,
         position=data.position,
@@ -773,6 +818,8 @@ async def update_sequence(
 
             enqueue_global_recalculate(background_tasks)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    reset_campaign_incidents(campaign_id)
     # Re-query with variants eagerly loaded to avoid lazy-load MissingGreenlet error
     result2 = await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
@@ -810,6 +857,8 @@ async def delete_sequence(
     for s in remaining.scalars().all():
         s.position -= 1
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
+    reset_campaign_incidents(campaign_id)
     # If we deleted a personalized sequence, reconcile leads' statuses
     if was_personalized:
         await reconcile_personalized_status(db, campaign_id, background_tasks)
@@ -872,6 +921,7 @@ async def create_variant(
     )
     db.add(variant)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     await db.refresh(variant)
     log.info("create_variant: sequence=%s variant=%s label=%r", seq.id, variant.id, variant.label)
     return variant
@@ -914,6 +964,7 @@ async def update_variant(
     if data.enabled is not None:
         variant.enabled = data.enabled
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     await db.refresh(variant)
     return variant
 
@@ -940,6 +991,7 @@ async def delete_variant(
         raise HTTPException(404, "Variant not found")
     await db.delete(variant)
     await db.flush()
+    await clear_missing_var_blocks(db, campaign_id=campaign_id)
     return {"ok": True}
 
 
@@ -1178,6 +1230,7 @@ async def patch_campaign_lead(
         cl.sending_paused = payload.sending_paused
 
     await db.flush()
+    await clear_missing_var_blocks(db, lead_id=lead_id, campaign_id=campaign_id)
     # Full global recalculation: schedule must mirror what the send job will deliver.
     await db.commit()
     from app.routers.schedule import enqueue_global_recalculate
@@ -1435,6 +1488,7 @@ async def write_custom_email(
         )
         db.add(override)
     await db.flush()
+    await clear_missing_var_blocks(db, lead_id=lead_id, campaign_id=campaign_id)
 
     # Check if all personalized sequences now have overrides
     pers_seq_result = await db.execute(
@@ -2072,6 +2126,7 @@ async def bulk_add_leads_to_campaign(
                     changed = True
                 if changed:
                     await db.flush()
+                    await clear_missing_var_blocks(db, lead_id=lead.id)
 
             # Check enrollment
             if skip_duplicates:
@@ -2215,6 +2270,7 @@ async def bulk_add_leads_to_campaign(
         "errors": errors,
         "results": results,
         "verification_queued": verify_emails and bool(added_lead_ids),
+        "missing_vars": await missing_vars_report(db, campaign_id),
     }
 
 
@@ -2801,6 +2857,7 @@ async def import_campaign_leads(
                         changed = True
                 if changed:
                     await db.flush()
+                    await clear_missing_var_blocks(db, lead_id=lead.id)
 
             if skip_duplicates:
                 # Global check: skip if enrolled in any campaign
@@ -2925,6 +2982,7 @@ async def import_campaign_leads(
         "errors": errors,
         "total_rows": added + already_enrolled + duplicates_in_batch + errors,
         "verification_queued": verify_emails and bool(added_lead_ids_csv),
+        "missing_vars": await missing_vars_report(db, campaign_id),
     }
 
 
