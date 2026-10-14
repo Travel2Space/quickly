@@ -1,6 +1,7 @@
 """Send-time helpers shared by the send paths in app/jobs.py and the campaign routers."""
 from __future__ import annotations
 
+import re
 import time
 from typing import Hashable
 
@@ -113,3 +114,12 @@ async def missing_vars_report(db, campaign_id: int) -> dict:
             for n in gaps:
                 counts[n] = counts.get(n, 0) + 1
     return {"leads_missing": leads_missing, "variables": dict(sorted(counts.items()))}
+
+
+_REPLY_PREFIX_RE = re.compile(r"^re\s*:", re.IGNORECASE)
+
+
+def reply_subject(prev_subject: str) -> str:
+    """'Re: ' + the subject being answered, never doubled."""
+    s = (prev_subject or "").strip()
+    return s if _REPLY_PREFIX_RE.match(s) else f"Re: {s}"

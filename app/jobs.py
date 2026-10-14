@@ -40,7 +40,7 @@ from app.models import (
 )
 from app.sender import MissingTemplateVars, send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
-from app.send_prep import notify_once, render_all_strict
+from app.send_prep import notify_once, render_all_strict, reply_subject
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -540,16 +540,24 @@ async def run_send_job():
                     all_logs = all_logs_result.scalars().all()
 
                     if all_logs:
-                        # In-Reply-To = most recent message (direct parent)
-                        reply_to_msg_id = all_logs[-1].message_id
-                        # References = ALL message IDs in order (space-separated)
+                        anchor = next(
+                            (e for e in reversed(all_logs)
+                             if e.subject and e.subject.strip() and e.subject != "(no subject)"),
+                            all_logs[-1],
+                        )
+                        # The chain is the thread being answered: a step with its own subject opened
+                        # a new thread, and earlier threads must not leak into References.
+                        chain = [
+                            e for e in all_logs[: all_logs.index(anchor) + 1]
+                            if e is anchor or (anchor.thread_id and e.thread_id == anchor.thread_id)
+                        ]
+                        reply_to_msg_id = anchor.message_id
                         references_chain = " ".join(
                             (mid if mid.startswith("<") else f"<{mid}>")
-                            for log_entry in all_logs
+                            for log_entry in chain
                             if (mid := log_entry.message_id)
                         )
-                        # Gmail threadId from most recent
-                        prev_thread_id = all_logs[-1].thread_id
+                        prev_thread_id = anchor.thread_id
                         # Guard: reject a thread_id that belongs to a *different* campaign
                         # for this lead.  Gmail may subject-match the very first email of
                         # this campaign into an existing thread from a previous campaign with
@@ -570,27 +578,17 @@ async def run_send_job():
                                     prev_thread_id, lead.id,
                                 )
                                 prev_thread_id = None
-                        # Subject: Re: <original subject> from the FIRST email that had a real subject
-                        first_with_subject = next(
-                            (e for e in all_logs if e.subject and e.subject.strip() and e.subject != "(no subject)"),
-                            None,
-                        )
-                        if first_with_subject:
-                            orig_subj = first_with_subject.subject
-                            if orig_subj.lower().startswith("re: "):
-                                subject = orig_subj
-                            else:
-                                subject = f"Re: {orig_subj}"
-                        else:
-                            subject = "(no subject)"
+                        # Subject: Re: <subject of the email being answered>
+                        real = anchor.subject and anchor.subject.strip() and anchor.subject != "(no subject)"
+                        subject = reply_subject(anchor.subject) if real else "(no subject)"
 
                         # Fetch the previous email's body for quoting from the
                         # sequence/variant definition.  This is always available
                         # (no dependency on Gmail/O365 unibox sync) and is
                         # campaign-scoped by construction, so quoting can never
                         # accidentally include content from a different campaign's thread.
-                        prev_sent_at = all_logs[-1].sent_at
-                        _prev_log = all_logs[-1]
+                        prev_sent_at = anchor.sent_at
+                        _prev_log = anchor
                         _prev_seq_row = await session.execute(
                             select(Sequence).where(
                                 Sequence.campaign_id == campaign.id,
@@ -1443,13 +1441,24 @@ async def send_slot_job(slot_id: int) -> None:
             all_logs = all_logs_result.scalars().all()
 
             if all_logs:
-                reply_to_msg_id = all_logs[-1].message_id
+                anchor = next(
+                    (e for e in reversed(all_logs)
+                     if e.subject and e.subject.strip() and e.subject != "(no subject)"),
+                    all_logs[-1],
+                )
+                # The chain is the thread being answered: a step with its own subject opened
+                # a new thread, and earlier threads must not leak into References.
+                chain = [
+                    e for e in all_logs[: all_logs.index(anchor) + 1]
+                    if e is anchor or (anchor.thread_id and e.thread_id == anchor.thread_id)
+                ]
+                reply_to_msg_id = anchor.message_id
                 references_chain = " ".join(
                     (mid if mid.startswith("<") else f"<{mid}>")
-                    for log_entry in all_logs
+                    for log_entry in chain
                     if (mid := log_entry.message_id)
                 )
-                prev_thread_id = all_logs[-1].thread_id
+                prev_thread_id = anchor.thread_id
                 if prev_thread_id:
                     _cross_camp_row = await session.execute(
                         select(EmailLog.id).where(
@@ -1466,19 +1475,11 @@ async def send_slot_job(slot_id: int) -> None:
                         )
                         prev_thread_id = None
 
-                first_with_subject = next(
-                    (e for e in all_logs if e.subject and e.subject.strip()
-                     and e.subject != "(no subject)"),
-                    None,
-                )
-                if first_with_subject:
-                    orig_subj = first_with_subject.subject
-                    subject = orig_subj if orig_subj.lower().startswith("re: ") else f"Re: {orig_subj}"
-                else:
-                    subject = "(no subject)"
+                real = anchor.subject and anchor.subject.strip() and anchor.subject != "(no subject)"
+                subject = reply_subject(anchor.subject) if real else "(no subject)"
 
-                prev_sent_at = all_logs[-1].sent_at
-                _prev_log = all_logs[-1]
+                prev_sent_at = anchor.sent_at
+                _prev_log = anchor
                 _prev_seq_row = await session.execute(
                     select(Sequence).where(
                         Sequence.campaign_id == campaign.id,
