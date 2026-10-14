@@ -31,7 +31,7 @@ docker run -d --name qk-s3 --network "$NET" \
 docker run -d --name qk-faketg --network "$NET" -v "$(hostpath "$KIT/test"):/t:ro" python:3.12-alpine python /t/fake_telegram.py >/dev/null
 docker run -d --name "$R" --network "$NET" -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$(hostpath "$KIT"):/opt/quickly" docker:27-cli sleep 3600 >/dev/null
-docker exec "$R" sh -c "apk add -q bash curl openssl age 2>/dev/null || apk add -q bash curl openssl age --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community"
+docker exec "$R" sh -c "apk add -q bash curl openssl age util-linux 2>/dev/null || apk add -q bash curl openssl age util-linux --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community"
 
 run 'age-keygen -o /tmp/age.key 2>/dev/null; pub=$(age-keygen -y /tmp/age.key)
   cat > .env <<EOF

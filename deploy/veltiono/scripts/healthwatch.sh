@@ -7,6 +7,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib.sh"
 load_env
 
+# A slow run (hung curl/openssl) must not pile up under the next 5-minute tick.
+exec 9>"$STATE_DIR/healthwatch.lock"
+flock -n 9 || exit 0
+
 FAILS="$STATE_DIR/health-fails"; DOWN="$STATE_DIR/health-down"
 
 once_a_day() {  # once_a_day <key> <message>
@@ -31,7 +35,7 @@ use="$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')"
 case "$HEALTH_URL" in
   https://*)
     host="$(printf '%s' "$HEALTH_URL" | sed -E 's#https://([^/:]+).*#\1#')"
-    if ! echo | openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null \
+    if ! echo | timeout 15 openssl s_client -servername "$host" -connect "$host:443" 2>/dev/null \
         | openssl x509 -noout -checkend $((14 * 86400)) >/dev/null 2>&1; then
       once_a_day cert "TLS-сертификат $host истекает меньше чем через 14 дней (или не читается)"
     fi ;;
