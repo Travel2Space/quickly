@@ -1568,16 +1568,46 @@ async def _get_smtp_thread_messages(
     }
 
 
+_IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _imap_since(days: int) -> str:
+    d = (time_provider.utcnow() - timedelta(days=days)).date()  # locale-free IMAP date
+    return f"SINCE {d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year}"
+
+
+def _sender_ignored(from_addr: str, ignore_list: str | None) -> bool:
+    """Exact address, or a domain (with or without '@') incl. its subdomains."""
+    addr = (from_addr or "").strip().lower()
+    domain = addr.rpartition("@")[2]
+    for raw in (ignore_list or "").replace(",", "\n").splitlines():
+        entry = raw.strip().lower()
+        if not entry:
+            continue
+        if "@" in entry.lstrip("@"):
+            if addr == entry:
+                return True
+        else:
+            d = entry.lstrip("@")
+            if domain == d or domain.endswith("." + d):
+                return True
+    return False
+
+
 def _fetch_smtp_new_messages(
     account: SmtpAccount,
     uidvalidity: int | None,
     last_uid: int,
     cap: int = _SMTP_SYNC_FETCH_CAP,
-) -> tuple[int | None, list[tuple[int, bytes]]]:
+    *,
+    backfill_days: int = 0,
+) -> tuple[int | None, list[tuple[int, bytes]], int | None]:
     """Blocking IMAP fetch of messages with UID greater than *last_uid*.
 
-    Returns ``(uidvalidity, [(uid, rfc822_bytes), ...])``. Raises on
-    connection/auth errors so the caller can surface them.
+    Returns ``(uidvalidity, [(uid, rfc822_bytes), ...], baseline_uid)``.
+    ``baseline_uid`` is set only on the first sync / a recreated mailbox: the
+    cursor is placed at "now" (UIDNEXT-1) and, unless *backfill_days* is
+    given, nothing is imported. Raises on connection/auth errors.
     """
     from app.smtp_utils import _imap_connect, smtp_timeout_seconds
 
@@ -1585,6 +1615,7 @@ def _fetch_smtp_new_messages(
     try:
         typ, data = client.status("INBOX", "(UIDVALIDITY UIDNEXT)")
         current_validity: int | None = uidvalidity
+        uidnext = 0
         try:
             status_raw = (data[0] or b"").decode("utf-8", errors="ignore") if data else ""
             import re as _re
@@ -1592,21 +1623,37 @@ def _fetch_smtp_new_messages(
             m = _re.search(r"UIDVALIDITY\s+(\d+)", status_raw)
             if m:
                 current_validity = int(m.group(1))
+            mn = _re.search(r"UIDNEXT\s+(\d+)", status_raw)
+            if mn:
+                uidnext = int(mn.group(1))
         except Exception:
             pass
+        baseline: int | None = None
         if current_validity != uidvalidity:
-            # Mailbox was recreated (or first sync) — fetch from scratch.
-            last_uid = 0
-
-        typ, uid_data = client.uid("search", None, f"UID {int(last_uid) + 1}:*")
-        if typ != "OK":
-            return current_validity, []
-        uid_bytes = uid_data[0] if uid_data else b""
-        uids = [int(u) for u in uid_bytes.split() if u.isdigit()]
+            # First sync or recreated mailbox: start from "now", not from UID 1.
+            baseline = max(uidnext - 1, 0)
+            last_uid = baseline
+            if backfill_days > 0:
+                typ, uid_data = client.uid("search", None, _imap_since(backfill_days))
+                if typ != "OK":
+                    return current_validity, [], baseline
+                uid_bytes = uid_data[0] if uid_data else b""
+                uids = [int(u) for u in uid_bytes.split() if u.isdigit()]
+            else:
+                uids = []
+        else:
+            typ, uid_data = client.uid("search", None, f"UID {int(last_uid) + 1}:*")
+            if typ != "OK":
+                return current_validity, [], None
+            uid_bytes = uid_data[0] if uid_data else b""
+            uids = [int(u) for u in uid_bytes.split() if u.isdigit()]
         # Only process genuinely-new UIDs (RFC 3501 `last+1:*` can re-return
         # the highest existing message) and, when over the cap, keep the
         # NEWEST ones so a busy INBOX cannot starve fresh reply detection.
-        uids = sorted(u for u in uids if u > int(last_uid))
+        if baseline is None:
+            uids = sorted(u for u in uids if u > int(last_uid))
+        else:
+            uids = sorted(set(uids))  # backfill: SINCE results, all at or below the baseline
         cap = max(1, cap)
         if len(uids) > cap:
             deferred = len(uids) - cap
@@ -1630,7 +1677,7 @@ def _fetch_smtp_new_messages(
                 if isinstance(part, tuple) and len(part) == 2 and isinstance(part[1], (bytes, bytearray)):
                     out.append((uid, bytes(part[1])))
                     break
-        return current_validity, out
+        return current_validity, out, baseline
     finally:
         try:
             client.logout()
@@ -1915,8 +1962,9 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
         await db.flush()
 
     try:
-        new_validity, fetched = await asyncio.to_thread(
-            _fetch_smtp_new_messages, acct, state.uidvalidity, state.last_uid or 0
+        new_validity, fetched, baseline_uid = await asyncio.to_thread(
+            _fetch_smtp_new_messages, acct, state.uidvalidity, state.last_uid or 0,
+            backfill_days=acct.imap_backfill_days or 0,
         )
     except Exception as exc:
         log.warning("SMTP IMAP sync failed for inbox_id=%s: %s", inbox.id, exc)
@@ -1946,7 +1994,7 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
 
     if new_validity != state.uidvalidity:
         state.uidvalidity = new_validity
-        state.last_uid = 0
+        state.last_uid = baseline_uid or 0
         await db.flush()
 
     if not fetched:
@@ -1958,6 +2006,8 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
     max_uid = state.last_uid or 0
     for uid, raw in fetched:
         max_uid = max(max_uid, uid)
+        hit = None
+        echo_hit = None
         try:
             parsed = _parse_imap(raw)
         except Exception:
@@ -1965,6 +2015,9 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
             continue
         # Skip our own sent copies to avoid self-reply loops.
         if (parsed.get("from") or "").lower() == own_addr:
+            continue
+        sender = (parsed.get("from") or "").lower()
+        if _sender_ignored(sender, acct.unibox_ignore_senders):
             continue
         message_pk = f"{new_validity}:{uid}" if new_validity else f"uid:{uid}"
 
@@ -1996,6 +2049,13 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
                 echo_hit = echo_res.scalar_one_or_none()
                 if echo_hit:
                     thread_key = echo_hit
+
+        if not acct.unibox_store_unmatched and not (
+            hit or echo_hit or _MAILER_DAEMON_RE.match(sender)
+            or await _lead_campaign_from_chain(db, parsed.get("in_reply_to"), parsed.get("references"))
+            or (await db.execute(select(Lead.id).where(func.lower(Lead.email) == sender).limit(1))).first()
+        ):
+            continue
 
         _row, _created, _touched = await _process_smtp_inbound_message(
             db, inbox=inbox, parsed=parsed, message_pk=message_pk, thread_key=thread_key

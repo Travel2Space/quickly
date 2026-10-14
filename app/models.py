@@ -764,6 +764,12 @@ class SmtpAccount(Base):
     # "active but nothing sends" is visible instead of silently retried).
     last_send_error = Column(Text, default="")
     last_send_at = Column(DateTime, nullable=True)
+    # Unibox intake (Q-9). First sync starts at "now" unless this asks for N days of history.
+    imap_backfill_days = Column(Integer, default=0, nullable=False)
+    # False = keep only lead replies, mail in our threads and bounces; the rest is skipped.
+    unibox_store_unmatched = Column(Boolean, default=True, nullable=False)
+    # Newline/comma separated addresses or domains whose mail is never stored (warm-up pools).
+    unibox_ignore_senders = Column(Text, default="", nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     inbox = relationship("Inbox", back_populates="smtp_account")
