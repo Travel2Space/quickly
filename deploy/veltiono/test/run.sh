@@ -70,11 +70,18 @@ curl -fs http://127.0.0.1:5059/health | grep '"ok"' >/dev/null || die "D1 loopba
 if docker exec quickly-app-1 env | grep -E '^(R2_|TELEGRAM_|BACKUP_AGE_)' >/dev/null; then die "D1 ops secrets leaked into the app"; fi
 pass D1
 
-# D2 — encrypted backup lands in the bucket with a manifest
-run '. scripts/lib.sh; load_env; aws_r2 s3 mb "s3://$R2_BUCKET" >/dev/null'
+# D2 — encrypted backup lands in its own folder, manifest.json last; old folders are pruned and
+# an incomplete one (no manifest.json) is never picked as "newest"
+run '. scripts/lib.sh; load_env; aws_r2 s3 mb "s3://$R2_BUCKET" >/dev/null
+  echo x | aws_r2 s3 cp - "s3://$R2_BUCKET/quickly/2099-01-01T000000Z/dump.pgc.age" >/dev/null   # incomplete, "newest"
+  echo x | aws_r2 s3 cp - "s3://$R2_BUCKET/quickly/2000-01-01T000000Z/manifest.json" >/dev/null   # past retention'
 run 'bash scripts/backup.sh' >/dev/null || die "D2 backup.sh"
 run '. scripts/lib.sh; load_env; aws_r2 s3 ls --recursive "s3://$R2_BUCKET/quickly/"' | grep 'manifest.json' >/dev/null || die "D2 manifest"
-run '. scripts/lib.sh; load_env; aws_r2 s3 cp "s3://$R2_BUCKET/quickly/$(date -u +%Y-%m-%d)/dump.pgc.age" - </dev/null > /tmp/dump-head.age && head -c 21 /tmp/dump-head.age' \
+run '. scripts/lib.sh; load_env; aws_r2 s3 ls "s3://$R2_BUCKET/quickly/" </dev/null' | grep '2000-01-01T000000Z' >/dev/null && die "D2 old folder not pruned"
+F="$(run '. scripts/lib.sh; load_env; find_backup' | tr -d '\r')"
+case "$F" in 20[0-9][0-9]-*T*Z) [ "$F" != 2099-01-01T000000Z ] || die "D2 incomplete folder picked" ;; *) die "D2 bad folder name: $F" ;; esac
+[ "$(run 'cat state/last-backup-folder' | tr -d '\r')" = "$F" ] || die "D2 last-backup-folder"
+run ". scripts/lib.sh; load_env; aws_r2 s3 cp \"s3://\$R2_BUCKET/quickly/$F/dump.pgc.age\" - </dev/null > /tmp/dump-head.age && head -c 21 /tmp/dump-head.age" \
   | grep 'age-encryption.org/v1' >/dev/null && pass D2 || die "D2 not encrypted"
 
 # D3 — restore drill with the private key on stdin

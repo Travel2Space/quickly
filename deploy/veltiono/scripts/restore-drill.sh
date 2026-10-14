@@ -16,8 +16,7 @@ trap cleanup EXIT
 read -rs AGEKEY   # silent: the private key must not land in the terminal scrollback
 printf '%s\n' "$AGEKEY" > "$KEYFILE"; chmod 600 "$KEYFILE"; unset AGEKEY
 
-DAY="$(aws_r2 s3 ls "s3://$R2_BUCKET/quickly/" </dev/null | awk '$1=="PRE"{sub("/","",$2); print $2}' | sort | tail -1)"
-[ -n "$DAY" ] || { echo "no backups found" >&2; exit 1; }
+DAY="$(find_backup)" || { echo "no complete backup (with manifest.json) found" >&2; exit 1; }
 MANIFEST="$(aws_r2 s3 cp "s3://$R2_BUCKET/quickly/$DAY/manifest.json" - </dev/null)"
 aws_r2 s3 cp "s3://$R2_BUCKET/quickly/$DAY/dump.pgc.age" - </dev/null | age -d -i "$KEYFILE" > "$DUMP"
 

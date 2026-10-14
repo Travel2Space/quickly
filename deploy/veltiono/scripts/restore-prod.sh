@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # DESTRUCTIVE: replace the live database with a backup — but only after the backup is proven.
-#   Usage: restore-prod.sh [YYYY-MM-DD]   (default: newest). Type RESTORE, then paste the age
+#   Usage: restore-prod.sh [YYYY-MM-DD|folder]   (default: newest COMPLETE backup, i.e. with
+#   manifest.json; a day picks that day's newest, a folder name picks exactly it). Type RESTORE, then paste the age
 #   private key (silent, never stored). Steps:
 #     1. validate: stream R2 → age → pg_restore -l (wrong key / corrupt dump stops here, nothing touched)
 #     2. app stopped, safety dump of the live DB → $STATE_DIR/pre-restore-<UTC>.pgc.age (public key)
@@ -15,8 +16,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 load_env
 
 PGU="${POSTGRES_USER:-quickly}"; PGD="${POSTGRES_DB:-quickly}"; NEWDB="${PGD}_restore"
-DAY="${1:-$(aws_r2 s3 ls "s3://$R2_BUCKET/quickly/" </dev/null | awk '$1=="PRE"{sub("/","",$2); print $2}' | sort | tail -1)}"
-[ -n "$DAY" ] || { echo "no backups found" >&2; exit 1; }
+DAY="$(find_backup "${1:-}")" || { echo "no complete backup (with manifest.json) found${1:+ for $1}" >&2; exit 1; }
 SRC="s3://$R2_BUCKET/quickly/$DAY/dump.pgc.age"
 
 printf 'This REPLACES database %s with the backup of %s. Type RESTORE to continue: ' "$PGD" "$DAY" >&2

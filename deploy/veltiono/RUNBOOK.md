@@ -98,7 +98,12 @@ curl -s https://outreach.veltiono.eu/health    # → {"ok":true}
 - В Cloudflare R2 создать API token с правом Object Read & Write **только на бакет** `veltiono-backups`.
 - `BACKUP_AGE_PUBLIC_KEY` и `R2_*` — в `ops.env`. Ключ — тот же публичный ключ, что в GitHub secret `BACKUP_AGE_PUBLIC_KEY`
   веб-бэкапа. Приватный ключ на сервер не попадает никогда.
-- Первый прогон вручную: `bash scripts/backup.sh`, затем проверить в R2 появление `quickly/<дата>/`
+- Каждый прогон пишет в свою папку `quickly/<YYYY-MM-DD>T<HHMMSS>Z/`: сначала `dump.pgc.age`, потом
+  проверка размера, и **последним** `manifest.json` — это отметка «бэкап полный». Если что-то упало,
+  объекты этой папки удаляются. Восстановление и учебное восстановление берут самую свежую папку, в
+  которой есть `manifest.json`. Старые папки удаляются по дате из имени (`RETENTION_DAYS`); сбой
+  очистки не считается провалом бэкапа (в лог пишется `prune failed`).
+- Первый прогон вручную: `bash scripts/backup.sh`, затем проверить в R2 появление `quickly/<папка>/`
   с файлами `dump.pgc.age` и `manifest.json`.
 
 ## 9. Telegram (ops-чат)
@@ -141,10 +146,11 @@ bash scripts/restore-drill.sh
 ## 13. Восстановление в бою
 
 ```bash
-bash scripts/restore-prod.sh [YYYY-MM-DD]
+bash scripts/restore-prod.sh [YYYY-MM-DD или имя папки]
 ```
 
-Без даты берётся самый свежий бэкап. Скрипт попросит напечатать `RESTORE` и вставить приватный
+Без аргумента берётся самый свежий полный бэкап (с `manifest.json`); дата выбирает самую свежую папку
+этого дня, имя папки — именно её. Скрипт попросит напечатать `RESTORE` и вставить приватный
 ключ age (ввод скрыт, не сохраняется). Дамп идёт потоком R2 → age → `pg_restore`; расшифрованный
 файл на диск не пишется. Нужен тот же `QUICKLY_ENCRYPTION_KEY`, что был при бэкапе.
 

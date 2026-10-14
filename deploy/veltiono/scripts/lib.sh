@@ -79,3 +79,17 @@ health_ok() {
   body="$(curl -fsS -m 10 "$1" 2>/dev/null || true)"
   case "$body" in *'"ok":true'*|*'"ok": true'*) return 0 ;; *) return 1 ;; esac
 }
+
+# Newest backup folder under quickly/ that HAS manifest.json (the completion marker backup.sh
+# writes last), optionally limited to names starting with $1 (a day, YYYY-MM-DD, or a full
+# folder name). Prints the folder name; exit 1 when there is none.
+find_backup() {
+  local want="${1:-}" f
+  while read -r f; do
+    case "$f" in "$want"*) ;; *) continue ;; esac
+    if aws_r2 s3api head-object --bucket "$R2_BUCKET" --key "quickly/$f/manifest.json" </dev/null >/dev/null 2>&1; then
+      printf '%s\n' "$f"; return 0
+    fi
+  done < <(aws_r2 s3 ls "s3://$R2_BUCKET/quickly/" </dev/null | awk '$1=="PRE"{sub("/","",$2); print $2}' | sort -r)
+  return 1
+}
