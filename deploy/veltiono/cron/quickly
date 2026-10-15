@@ -1,0 +1,7 @@
+# Quickly — hours assume the server clock is UTC (`timedatectl` → Time zone: UTC; otherwise
+# shift them). 06:00 UTC = 09:00 Athens in summer (08:00 in winter).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 3 * * * root /opt/quickly/scripts/backup.sh      >> /var/log/quickly-backup.log 2>&1
+*/5 * * * * root /opt/quickly/scripts/healthwatch.sh >> /var/log/quickly-health.log 2>&1
+0 6 * * *  root /opt/quickly/scripts/heartbeat.sh   >> /var/log/quickly-heartbeat.log 2>&1

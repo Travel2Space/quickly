@@ -1,0 +1,19 @@
+# Existing Traefik on the host routes by labels; no published port.
+services:
+  app:
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.quickly.rule=Host(`${QUICKLY_HOST:-outreach.veltiono.eu}`)
+      - traefik.http.routers.quickly.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}
+      - traefik.http.routers.quickly.tls.certresolver=${TRAEFIK_CERTRESOLVER:-letsencrypt}
+      - traefik.http.services.quickly.loadbalancer.server.port=8000
+      - traefik.docker.network=${TRAEFIK_NETWORK:-traefik}
+    networks:
+      default: {}
+      traefik:
+        aliases: [quickly-app]   # unique DNS name on the shared network (`app` collides with other stacks)
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}

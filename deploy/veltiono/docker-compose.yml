@@ -1,0 +1,47 @@
+# Quickly for Veltiono. ONE instance only: the scheduler lives inside the app process and
+# takes no row locks — never scale `app` beyond 1. The proxy overlay (nginx or Traefik) is
+# chosen with COMPOSE_FILE in .env.
+name: quickly
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quickly}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-quickly}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quickly} -d ${POSTGRES_DB:-quickly}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: *logging
+
+  app:
+    image: ${QUICKLY_IMAGE:-ghcr.io/travel2space/quickly}:${QUICKLY_IMAGE_TAG:?set QUICKLY_IMAGE_TAG in .env}
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-quickly}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-quickly}
+      QUICKLY_MODE: production
+      QUICKLY_PREBUILT_IMAGE: "1"
+      # The proxy reaches the container from the Docker network, not 127.0.0.1: without this
+      # uvicorn ignores X-Forwarded-For/Proto and every client looks like the gateway IP
+      # (shared rate limits, wrong scheme). "*" trusts whoever can reach the port: with the nginx
+      # overlay that is only the host's nginx (port published on loopback only); with the Traefik
+      # overlay it is EVERY container on the shared traefik network, so keep untrusted
+      # containers off that network.
+      FORWARDED_ALLOW_IPS: "*"
+    logging: *logging
+
+volumes:
+  pgdata: {}
